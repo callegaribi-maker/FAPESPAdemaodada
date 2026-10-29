@@ -197,6 +197,73 @@ def forest(rows, xlabel):
     return fig
 
 
+
+# ---------------------------------------------------------------- mapa
+import json as _json
+
+CLS_COR = {"hi": "#d64541", "mid": "#f2b33d", "lo": "#3a9d63", "off": "#e4e8e6"}
+BONS = {"orient", "ativ", "renda"}
+# deslocamento do rótulo (pixels) para evitar sobreposição: (ax, ay)
+OFF_MAIN = {"Oriximiná": (0, -30), "Óbidos": (60, -20), "Juruti": (-70, 30), "Santarém": (40, -35),
+            "Itaituba": (-40, 30), "Altamira": (-30, 70), "Vitória do Xingu": (70, -45), "Oeiras do Pará": (40, -30),
+            "Tucuruí": (-60, -20), "Itupiranga": (-90, -25), "Nova Ipixuna": (90, -25), "Marabá": (80, 20),
+            "Parauapebas": (-60, 35)}
+OFF_INSET = {"Belém": (-60, -40), "Ananindeua": (-40, 45), "Marituba": (50, 55), "Castanhal": (0, -45),
+             "Capanema": (-40, -55), "Tracuateua": (-30, -80), "Bragança": (40, -60), "Augusto Corrêa": (90, -35),
+             "Cachoeira do Piriá": (90, 10)}
+
+
+@st.cache_data
+def carregar_geo():
+    return _json.load(open("pa_municipios.geojson", encoding="utf-8"))
+
+
+GEO = carregar_geo()
+
+
+def _xy(feat):
+    xs, ys = [], []
+    for poly in feat["geometry"]["coordinates"]:
+        ring = poly[0]
+        xs += [p[0] for p in ring] + [None]
+        ys += [p[1] for p in ring] + [None]
+    return xs, ys
+
+
+def mapa_fig(fc, vals, mk, altura, offsets, destaque=False, sem_rotulo=()):
+    fig = go.Figure()
+    xs, ys = [], []
+    for f in fc["features"]:
+        if f["properties"]["mun"] not in vals:
+            x, y = _xy(f); xs += x; ys += y
+    fig.add_trace(go.Scatter(x=xs, y=ys, fill="toself", fillcolor=CLS_COR["off"], mode="lines",
+                             line=dict(color="white", width=0.8), hoverinfo="skip", showlegend=False))
+    for f in fc["features"]:
+        m = f["properties"]["mun"]
+        if m not in vals:
+            continue
+        v = vals[m]
+        x, y = _xy(f)
+        info = f"<b>{m}</b><br>{M[mk][0]}: {fmt(mk, v[mk])}<br>n = {v['n']}"
+        fig.add_trace(go.Scatter(x=x, y=y, fill="toself", fillcolor=CLS_COR[v["cls"]], mode="lines",
+                                 line=dict(color="white", width=1), hoveron="fills", text=info, hoverinfo="text",
+                                 showlegend=False))
+        cx, cy = f["properties"]["c"]
+        if m in sem_rotulo:
+            continue
+        ax, ay = offsets.get(m, (0, -30))
+        fig.add_annotation(x=cx, y=cy, text=f"<b>{m}</b>  {fmt(mk, v[mk])}", showarrow=True, ax=ax, ay=ay,
+                           arrowhead=0, arrowwidth=1.3, arrowcolor="#14201f", bgcolor="rgba(255,255,255,.94)",
+                           bordercolor=CLS_COR[v["cls"]], borderwidth=2.5, borderpad=4, font=dict(size=13, color="#14201f"))
+    if destaque:
+        fig.add_shape(type="rect", x0=-49.05, x1=-45.8, y0=-2.3, y1=-0.5, line=dict(color="#4c5856", dash="dash", width=1.5))
+        fig.add_annotation(x=-47.4, y=-0.35, text="área ampliada abaixo", showarrow=False, font=dict(size=11, color="#4c5856"))
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False, scaleanchor="x", scaleratio=1)
+    fig.update_layout(height=altura, margin=dict(l=0, r=0, t=0, b=0), plot_bgcolor="rgba(0,0,0,0)",
+                      paper_bgcolor="rgba(0,0,0,0)", dragmode="pan")
+    return fig
+
 # ---------------------------------------------------------------- filtros
 st.sidebar.title("Filtros")
 f_macro = st.sidebar.multiselect("Macrorregião", [f"Macro {m}" for m in MACROS], placeholder="Todos")
@@ -248,34 +315,61 @@ with abas[0]:
         delta = None if len(df) == len(df_all) else f"{(v - vt)*100:+.1f} p.p. vs total".replace(".", ",")
         cols[i % 4].metric(l, fmt(k, v), delta, delta_color="inverse" if k != "orient" else "normal")
 
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        st.subheader("Mapa do risco")
-        mk = sel_metrica("Indicador do mapa", key="mapa")
-        t = tabela(df, "mun", [mk]).reset_index()
-        t["lat"] = t.mun.map(lambda m: COORD[m][0]); t["lon"] = t.mun.map(lambda m: COORD[m][1])
-        t["valor"] = t[mk] * escala(mk)
-        t["macro"] = t.mun.map(df_all.drop_duplicates("mun").set_index("mun").macro_lbl)
-        fig = px.scatter_geo(t, lat="lat", lon="lon", size="n", color="valor", hover_name="mun",
-                             hover_data={"macro": True, "n": True, "valor": ":.2f", "lat": False, "lon": False},
-                             text="mun", color_continuous_scale=HEAT, size_max=28, labels={"valor": M[mk][0]})
-        fig.update_traces(textposition="top center", textfont_size=10, marker_line_color="#4c5856")
-        fig.update_geos(fitbounds="locations", showcountries=True, showsubunits=True, subunitcolor="#bbb",
-                        showrivers=True, rivercolor="#9ec5f4", showland=True, landcolor="#f6f7f5", resolution=50)
-        fig.update_layout(height=480, margin=dict(l=0, r=0, t=0, b=0))
-        st.plotly_chart(fig, width="stretch")
-    with c2:
-        st.subheader("Principais achados")
-        st.caption("Amostra completa, sem filtros.")
-        a = df_all
-        mq = a.groupby("mun").queda.mean().sort_values(ascending=False)
-        fq = a.groupby("faixa", observed=True).queda.mean()
-        dia, obs = rp(a, "diabetes"), rp(a, "obst")
-        orf = a[a.queda == 1].orient.mean()
-        st.markdown(f"""
+    st.subheader("Mapa do risco no Pará")
+    st.caption("Cada município pesquisado é pintado conforme o indicador: vermelho = situação pior, amarelo = "
+               "intermediária, verde = melhor, comparando os municípios entre si (terços). Cinza: sem coleta.")
+    mk = sel_metrica("Indicador do mapa", key="mapa")
+    dmap = filtrar(df_all, ignorar=("mun",))
+    t = tabela(dmap, "mun", [mk]).dropna()
+    bom = mk in BONS
+    q1, q2 = t[mk].quantile([1 / 3, 2 / 3]).values
+    def classe(v):
+        i = 0 if v < q1 else 1 if v < q2 else 2
+        return (["hi", "mid", "lo"] if bom else ["lo", "mid", "hi"])[i]
+    t["cls"] = t[mk].map(classe)
+    vals = t.to_dict("index")
+    st.plotly_chart(mapa_fig(GEO["main"], vals, mk, 860, OFF_MAIN, destaque=True, sem_rotulo=set(OFF_INSET)), width="stretch",
+                    config={"displayModeBar": False})
+    nomes = {"hi": "Pior terço", "mid": "Intermediário", "lo": "Melhor terço"}
+    faixas = {"hi": (q2, t[mk].max()), "mid": (q1, q2), "lo": (t[mk].min(), q1)} if not bom else \
+             {"lo": (q2, t[mk].max()), "mid": (q1, q2), "hi": (t[mk].min(), q1)}
+    st.markdown("&nbsp;&nbsp;".join(
+        f'<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px">'
+        f'<span style="width:16px;height:16px;border-radius:4px;background:{CLS_COR[c]}"></span>'
+        f'{nomes[c]}: {fmt(mk, faixas[c][0])} a {fmt(mk, faixas[c][1])}</span>' for c in ["hi", "mid", "lo"])
+        + f'<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:16px;'
+          f'border-radius:4px;background:{CLS_COR["off"]};border:1px solid #ccc"></span>Sem coleta</span>'
+          f'<br><small>Média dos municípios do recorte: <b>{fmt(mk, agg(dmap[mk], mk))}</b></small>',
+        unsafe_allow_html=True)
+    st.markdown("**Região Metropolitana e Nordeste paraense (ampliado)**")
+    st.plotly_chart(mapa_fig(GEO["inset"], vals, mk, 460, OFF_INSET), width="stretch",
+                    config={"displayModeBar": False})
+
+    st.markdown("**Ranking dos municípios**")
+    r = t.sort_values(mk, ascending=bom).reset_index()
+    r["Posição"] = range(1, len(r) + 1)
+    r["Situação"] = r.cls.map({"hi": "🔴 Pior terço", "mid": "🟡 Intermediário", "lo": "🟢 Melhor terço"})
+    r["valor"] = r[mk] * escala(mk)
+    st.dataframe(r[["Posição", "mun", "Situação", "valor", "n"]].rename(columns={"mun": "Município", "valor": M[mk][0]}),
+                 hide_index=True, width="stretch", height=min(36 * len(r) + 40, 520),
+                 column_config={M[mk][0]: st.column_config.ProgressColumn(
+                     M[mk][0], format="%.1f" if M[mk][1] != "med" else "%.4f",
+                     min_value=0, max_value=float(r["valor"].max()))})
+
+    st.subheader("Principais achados")
+    st.caption("Amostra completa, sem filtros.")
+    a = df_all
+    mq = a.groupby("mun").queda.mean().sort_values(ascending=False)
+    fq = a.groupby("faixa", observed=True).queda.mean()
+    dia, obs = rp(a, "diabetes"), rp(a, "obst")
+    orf = a[a.queda == 1].orient.mean()
+    f1, f2 = st.columns(2)
+    f1.markdown(f"""
 - **Território:** maiores taxas de queda em {', '.join(f'{m} ({v*100:.0f}%)' for m, v in mq.head(3).items())}; menores em {', '.join(f'{m} ({v*100:.0f}%)' for m, v in mq.tail(2).items())}.
 - **Idade:** a queda vai de {fq.iloc[0]*100:.0f}% (18–29) a {fq.iloc[-1]*100:.0f}% (70+).
 - **Diabetes:** quedas {dia['rp']:.1f}× mais frequentes ({dia['p1']*100:.0f}% vs {dia['p0']*100:.0f}%); efeito mantido no modelo ajustado.
+""")
+    f2.markdown(f"""
 - **Casa:** {a.obst.mean()*100:.0f}% relatam obstáculos; quedas {obs['rp']:.1f}× mais frequentes. É o fator modificável mais forte.
 - **Cuidado:** só {orf*100:.0f}% das mulheres que caíram receberam orientação profissional sobre quedas.
 - **Macrorregião:** a diferença de queda entre macros não se sustenta após ajuste por idade e clínica (aba Fatores de risco).
