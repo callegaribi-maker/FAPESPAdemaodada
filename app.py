@@ -52,6 +52,13 @@ BINLBL = {
 @st.cache_data
 def carregar():
     d = pd.read_csv("dados_quedas.csv")
+    # colunas do celular (versões antigas do CSV não as têm): cria vazias para o app não quebrar
+    for b in ["RMS AP", "RMS ML", "Desvio total", "Área elipse", "Freq. mediana AP", "Freq. mediana ML",
+              "Energia baixa AP", "Energia média AP", "Energia alta AP", "Energia baixa ML", "Energia média ML",
+              "Energia alta ML"]:
+        for c in ["OA", "OF"]:
+            if f"s_{b} ({c})" not in d.columns:
+                d[f"s_{b} ({c})"] = np.nan
     d["macro_lbl"] = "Macro " + d["macro"].astype(str)
     d["faixa"] = pd.cut(d.idade, [0, 29.99, 39.99, 49.99, 59.99, 69.99, 200],
                         labels=["18–29", "30–39", "40–49", "50–59", "60–69", "70+"])
@@ -958,6 +965,9 @@ with abas[7]:
                "gera 12 medidas por condição: amplitude (RMS, desvio total, área da elipse), frequência mediana e "
                "energia em três faixas (0–0,5 Hz, 0,5–2 Hz, 2–8 Hz), nos eixos antero-posterior (AP) e médio-lateral (ML).")
 
+    if df_all["s_RMS AP (OA)"].notna().sum() == 0:
+        st.error("O arquivo **dados_quedas.csv** do repositório é de uma versão antiga, sem as 24 medidas do celular. "
+                 "Substitua-o pela versão mais recente para ver as análises desta aba.")
     val = carregar_validacao()
     st.markdown("#### 1. Capacidade de distinguir, testada com validação cruzada")
     st.caption("AUC = probabilidade de o modelo dar escore maior a quem teve o desfecho do que a quem não teve. "
