@@ -5,7 +5,11 @@ Painel interativo (Streamlit) do projeto **"De mãos dadas para não deixar cair
 - 1.093 participantes · 22 municípios · 4 Macrorregiões de Saúde do Pará
 - Abas: Panorama (mapa), Municípios, Ciclo de vida, Fatores de risco (RP bruta e regressão logística), Equilíbrio postural (estabilometria OA/OF), Cruzamentos livres e Método
 - Filtros por macrorregião, município, faixa etária, cor/raça, escolaridade, renda e condição de saúde
-- Base desidentificada em `dados_quedas.csv` (sem nome, telefone ou endereço)
+- Dados lidos de `Planilha_Unica_22Municipios_anonimizada.xlsx` (mesma estrutura da planilha do projeto, com nome trocado pelo ID e telefone/endereço apagados), processados por `preparar_dados.py`
+- Estabilometria: valores do sinal bruto do celular reprocessado; quem não tem arquivo bruto válido mantém o valor original, convertido por `calibracao_estabilometria.json`
+
+## Arquivos do repositório
+`app.py`, `preparar_dados.py`, `Planilha_Unica_22Municipios_anonimizada.xlsx`, `calibracao_estabilometria.json`, `sensor_validacao.json`, `sinais_brutos.json`, `pa_municipios.geojson`, `requirements.txt`, `.streamlit/config.toml`
 
 ## Rodar localmente
 ```bash

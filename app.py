@@ -4,7 +4,7 @@ Projeto "De mãos dadas para não deixar cair" — LEMOH/UFPA · FAPESPA 105/202
 
 Painel interativo (Streamlit) sobre risco de quedas em mulheres paraenses:
 território, ciclo de vida, comorbidades e equilíbrio postural (estabilometria).
-Dados desidentificados em dados_quedas.csv.
+Dados lidos da planilha única (versão anonimizada) por preparar_dados.py.
 """
 import numpy as np
 import pandas as pd
@@ -51,7 +51,8 @@ BINLBL = {
 # ---------------------------------------------------------------- dados
 @st.cache_data
 def carregar():
-    d = pd.read_csv("dados_quedas.csv")
+    from preparar_dados import preparar
+    d = preparar()
     # colunas do celular (versões antigas do CSV não as têm): cria vazias para o app não quebrar
     for b in ["RMS AP", "RMS ML", "Desvio total", "Área elipse", "Freq. mediana AP", "Freq. mediana ML",
               "Energia baixa AP", "Energia média AP", "Energia alta AP", "Energia baixa ML", "Energia média ML",
@@ -966,8 +967,8 @@ with abas[7]:
                "energia em três faixas (0–0,5 Hz, 0,5–2 Hz, 2–8 Hz), nos eixos antero-posterior (AP) e médio-lateral (ML).")
 
     if df_all["s_RMS AP (OA)"].notna().sum() == 0:
-        st.error("O arquivo **dados_quedas.csv** do repositório é de uma versão antiga, sem as 24 medidas do celular. "
-                 "Substitua-o pela versão mais recente para ver as análises desta aba.")
+        st.error("A planilha do repositório não traz as medidas do celular. "
+                 "Substitua-a pela versão mais recente para ver as análises desta aba.")
     val = carregar_validacao()
     st.markdown("#### 1. Capacidade de distinguir, testada com validação cruzada")
     st.caption("AUC = probabilidade de o modelo dar escore maior a quem teve o desfecho do que a quem não teve. "
@@ -1049,9 +1050,9 @@ with abas[7]:
                      color_discrete_sequence=["#0d6b6e"])
         fig.update_layout(height=360)
         c2.plotly_chart(fig, width="stretch")
-        c1.caption("Na amostra completa, a área da elipse de olhos abertos mostra um **degrau**: ~18% de quedas "
-                   "nos três quintis inferiores e ~30% nos dois superiores. Acima de 0,021 u.a. (percentil 60) a "
-                   "sensibilidade é ~52% e a especificidade ~64%, útil para triagem de grupo, insuficiente para "
+        c1.caption("Na amostra completa, a área da elipse de olhos abertos mostra um **degrau**: ~16–22% de quedas "
+                   "nos três quintis inferiores e ~27–32% nos dois superiores. Acima do percentil 60 a "
+                   "sensibilidade é ~51% e a especificidade ~63%, útil para triagem de grupo, insuficiente para "
                    "diagnóstico individual.")
 
     st.markdown("#### 4. O que interfere no sinal do celular")
@@ -1068,9 +1069,9 @@ with abas[7]:
     fig.update_layout(height=720)
     st.plotly_chart(fig, width="stretch")
     st.caption("Destaques na amostra completa: a **energia de alta frequência AP cai com o IMC e a cintura** "
-               "(ρ ≈ −0,35): o tecido da região lombar amortece o sinal do aparelho, então o corpo da participante "
-               "interfere na medida. A **energia de média frequência AP sobe com a idade** (ρ ≈ +0,22) e é a "
-               "melhor marcadora de envelhecimento do equilíbrio.")
+               "(ρ ≈ −0,33): o tecido da região lombar amortece o sinal do aparelho, então o corpo da participante "
+               "interfere na medida (o mesmo vale para jerk e entropia amostral). A **energia de média frequência AP "
+               "sobe com a idade** (ρ ≈ +0,23) e é a melhor marcadora de envelhecimento do equilíbrio.")
 
     st.markdown("#### 5. Efeito do local de coleta")
     t = df[["mun", "s_Área elipse (OA)"]].dropna()
@@ -1079,10 +1080,10 @@ with abas[7]:
                  color_discrete_sequence=["#0d6b6e"], labels={"mun": "", "s_Área elipse (OA)": "Área elipse OA (log)"})
     fig.update_layout(height=420)
     st.plotly_chart(fig, width="stretch")
-    st.caption("O município explica ~11% da variação da área da elipse (Kruskal-Wallis p < 0,001). Mesmo "
-               "ajustando idade e IMC, Santarém mede ~2,5× a área de Belém. Parte disso pode ser real, mas parte "
-               "pode vir das condições de coleta (piso, ruído, aparelho, equipe), o que pede padronização e "
-               "registro dessas condições.")
+    st.caption("O município explica ~8% da variação da área da elipse (Kruskal-Wallis p < 0,001). Ajustando idade e "
+               "IMC, Santarém mede ~1,8× e Itupiranga ~1,6× a área de Belém. Em Santarém os valores ainda vêm da "
+               "planilha original (protocolo de 30 s, convertidos por calibração), então a diferença deve ser lida "
+               "com cautela; nos demais, pode refletir piso, ruído, aparelho ou diferenças reais.")
 
     st.markdown("#### 6. As 24 medidas repetem a mesma informação")
     st.caption("Quem balança muito tem, ao mesmo tempo, RMS alto, desvio total alto, área grande e energia de baixa "
@@ -1112,14 +1113,144 @@ with abas[7]:
 Para o artigo, use um representante de cada aspecto em vez das 24 medidas.
 """)
 
-    st.markdown("#### 7. Conclusões sobre o uso do celular")
+    # ---------------------------------------------------------------- sinais brutos
+    st.markdown("---")
+    st.markdown("#### 7. Reanálise dos sinais brutos do acelerômetro")
+    try:
+        SB = _json.load(open("sinais_brutos.json", encoding="utf-8"))
+    except Exception:
+        SB = None
+    if SB is None or "r_rms_ap_oa" not in df_all.columns:
+        st.info("Envie o arquivo **sinais_brutos.json** e a planilha anonimizada atualizada para ver esta seção.")
+    else:
+        q = SB["quality"]
+        st.caption("Os arquivos originais do aplicativo (aceleração a ~200 Hz, 60 s por condição) foram reprocessados do zero: "
+                   "reamostragem a 100 Hz, correção da inclinação e da orientação do celular pela gravidade, filtro 0,1–10 Hz e "
+                   "cálculo de 26 medidas por condição, incluindo medidas que não existiam na planilha (jerk, velocidade média, "
+                   "entropia amostral, frequência de 95% e entropia espectral).")
+        k = st.columns(4)
+        k[0].metric("Arquivos lidos", f"{q['n_files_total']:,}".replace(",", "."))
+        k[1].metric("Gravações únicas", f"{q['n_unique']:,}".replace(",", "."), "o restante eram cópias .csv/.txt", delta_color="off")
+        k[2].metric("Participantes ligadas à planilha", q["n_people"])
+        k[3].metric("Com OA e OF válidos", q["people_with_good_both"])
+
+        st.markdown("**Controle de qualidade: o que foi encontrado**")
+        st.markdown(f"""
+- **Celular deitado de lado:** 297 gravações, quase todas de Itaituba, foram feitas com o aparelho na horizontal. Na tabulação original
+  isso não foi corrigido; na reanálise os eixos foram recalculados pela gravidade e essas gravações passaram a ser aproveitadas.
+- **Protocolo diferente em Santarém:** as gravações de Santarém têm **30 s** (e não 60 s), formato de arquivo e versão do aplicativo
+  diferentes (2026). Isso ajuda a explicar por que Santarém aparecia com a maior oscilação da amostra: parte da diferença é do
+  método de coleta. Essas gravações ficaram fora da comparação principal.
+- **Movimento durante a coleta:** só {q['bad_spk']} gravações tiveram picos de movimento; {q['bad_dur']} foram curtas demais.
+- **Efeito do município caiu para {SB['eta']['sinais']*100:.0f}%** da variação da área de oscilação depois da reanálise
+  (antes, {SB['eta']['tabulada']*100:.0f}%): parte da "diferença entre territórios" era diferença de medição.
+""")
+        st.markdown("**A medida é repetível?**")
+        rel = SB["reliability"]
+        nomes_rel = {"rms_ap": "RMS antero-posterior", "rms_ml": "RMS médio-lateral", "area95": "Área da elipse 95%",
+                     "range_ap": "Amplitude AP", "jerk_ap": "Jerk AP", "path_vel": "Velocidade média",
+                     "f50_ap": "Frequência mediana AP", "f95_ap": "Frequência 95% AP", "sampen_ap": "Entropia amostral AP",
+                     "sampen_ml": "Entropia amostral ML", "spent_ap": "Entropia espectral AP"}
+        t = pd.DataFrame([{"Medida": v, "Teste-reteste OA (ICC)": rel["OA"]["retest"].get(k_),
+                           "Teste-reteste OF (ICC)": rel["OF"]["retest"].get(k_)} for k_, v in nomes_rel.items()])
+        c1, c2 = st.columns([3, 2])
+        fig = px.bar(t.melt("Medida", var_name="cond", value_name="ICC"), x="ICC", y="Medida", color="cond", barmode="group",
+                     orientation="h", color_discrete_sequence=["#2a78d6", "#eb6834"], labels={"cond": ""})
+        fig.add_vline(x=0.75, line_dash="dash", line_color="#3a9d63", annotation_text="boa")
+        fig.add_vline(x=0.5, line_dash="dot", line_color="#f2b33d", annotation_text="moderada")
+        fig.update_layout(height=420, xaxis_range=[0, 1], legend_orientation="h")
+        c1.plotly_chart(fig, width="stretch")
+        c2.markdown(f"""
+- **{rel['OA']['n_retest']} mulheres** tiveram duas gravações válidas na mesma condição: dá para medir a repetibilidade de verdade.
+- As medidas de **amplitude** (RMS, área, amplitude AP) e a **entropia amostral** têm ICC ≈ 0,8: **boa repetibilidade**.
+- As de **frequência** são moderadas (0,55–0,75).
+- Dentro da mesma gravação, os três terços de 20 s concordam com ICC ≈ {rel['OA']['thirds_area']:.2f}.
+
+""")
+
+        st.markdown("**Os sinais brutos discriminam melhor?** (validação cruzada, mesmas participantes)")
+        lin = []
+        for y, lab in [("queda", "Queda"), ("recorrente", "Quedas recorrentes"), ("lesao", "Queda com lesão"),
+                       ("idoso", "Idade ≥ 60"), ("diabetes", "Diabetes")]:
+            for nome, v in SB["cv"][y].items():
+                lin.append(dict(desfecho=lab, modelo=nome, auc=v[0], lo=v[1], hi=v[2]))
+        t = pd.DataFrame(lin)
+        cores_m = {"IRQ": "#7a3b8f", "Celular sinais brutos": "#eb6834",
+                   "Celular sinais brutos (random forest)": "#f2a07a", "IRQ + sinais brutos": "#0d6b6e"}
+        fig = px.bar(t, x="auc", y="desfecho", color="modelo", barmode="group", orientation="h",
+                     error_x=t.hi - t.auc, error_x_minus=t.auc - t.lo, color_discrete_map=cores_m,
+                     labels={"auc": "AUC (validação cruzada)", "desfecho": "", "modelo": ""})
+        fig.add_vline(x=0.5, line_dash="dash", line_color="#7a8583")
+        fig.update_layout(height=520, xaxis_range=[0.4, 0.9], legend_orientation="h", legend_y=-0.15)
+        st.plotly_chart(fig, width="stretch")
+        cvq = SB["cv"]
+        st.info(f"**Leitura:** com as 26 medidas do sinal bruto, o celular separa queda com AUC {cvq['queda']['Celular sinais brutos'][0]:.2f}, "
+                f"quedas recorrentes com {cvq['recorrente']['Celular sinais brutos'][0]:.2f} e, sobretudo, **envelhecimento com "
+                f"{cvq['idoso']['Celular sinais brutos'][0]:.2f}**. O IRQ-Pará ({cvq['queda']['IRQ'][0]:.2f}) continua melhor para "
+                "identificar quem cai, e somar o celular a ele não aumenta o acerto.")
+
+        st.markdown("**Medidas novas: qual separa melhor? (recalculado com os filtros)**")
+        nomes_f = {"rms_ap": "RMS AP", "rms_ml": "RMS ML", "rms_r": "RMS resultante", "area95": "Área elipse 95%",
+                   "range_ap": "Amplitude AP", "jerk_ap": "Jerk AP", "jerk_ml": "Jerk ML", "path_vel": "Velocidade média",
+                   "f50_ap": "Freq. mediana AP", "f95_ap": "Freq. 95% AP", "fcent_ap": "Freq. centroide AP",
+                   "sampen_ap": "Entropia amostral AP", "sampen_ml": "Entropia amostral ML", "spent_ap": "Entropia espectral AP",
+                   "pw_b1_ap": "Potência 0,1–0,5 Hz AP", "pw_b3_ap": "Potência 2–10 Hz AP"}
+        c1, c2 = st.columns([1, 2])
+        yr = c1.selectbox("Desfecho", list(SENS_OUT), format_func=SENS_OUT.get, key="r_out")
+        cnd = c1.radio("Condição", ["oa", "of", "rom"], horizontal=True, key="r_cond",
+                       format_func={"oa": "Olhos abertos", "of": "Olhos fechados", "rom": "Razão OF/OA"}.get)
+        dR = df.copy(); dR["idoso"] = (dR.idade >= 60).astype(float).where(dR.idade.notna())
+        lin = []
+        for k_, nm in nomes_f.items():
+            col = f"r_{k_}_{cnd}"
+            if col not in dR.columns:
+                continue
+            x = dR[[col, yr]].dropna()
+            if x[yr].nunique() < 2 or x[yr].sum() < 5:
+                continue
+            a, p = auc_mw(x[col].values, x[yr].values)
+            lin.append(dict(Medida=nm, AUC=a, p=p, n=len(x), sentido="maior em quem tem" if a >= 0.5 else "menor em quem tem",
+                            forca=abs(a - 0.5)))
+        Tm = pd.DataFrame(lin)
+        if not Tm.empty:
+            Tm = Tm.sort_values("forca")
+            fig = px.bar(Tm, x="AUC", y="Medida", color="sentido", orientation="h", hover_data={"p": ":.3f", "n": True},
+                         color_discrete_map={"maior em quem tem": "#d64541", "menor em quem tem": "#2a78d6"},
+                         labels={"sentido": ""})
+            fig.add_vline(x=0.5, line_dash="dash", line_color="#7a8583")
+            fig.update_layout(height=520, xaxis_range=[0.3, 0.75], legend_orientation="h")
+            c2.plotly_chart(fig, width="stretch")
+        c1.markdown("""
+**Destaque: entropia amostral.** Mede o quanto o balanço é irregular e adaptável. Valores **menores** (balanço mais
+rígido e repetitivo) aparecem em quem caiu, nas diabéticas e nas mais velhas, o padrão de "perda de complexidade" descrito
+na literatura de envelhecimento. É uma das medidas mais repetíveis (ICC ≈ 0,8) e não existia na planilha.
+
+**Jerk** mede a brusquidão das correções do corpo; **velocidade média**, quanto o corpo se desloca por segundo.
+""")
+
+        st.markdown("**E no perfil de risco?**")
+        sc = SB["sub_cv"]
+        t = pd.DataFrame([{"Subgrupo": k_, "AUC (sinais brutos, validação cruzada)": v} for k_, v in sc.items()])
+        t["grupo"] = np.where(t.Subgrupo.str.startswith(("Com ", "≥", "IRQ ≥")), "Perfil de risco",
+                              np.where(t.Subgrupo == "Todas", "Todas", "Sem o fator"))
+        fig = px.bar(t, x="AUC (sinais brutos, validação cruzada)", y="Subgrupo", color="grupo", orientation="h",
+                     color_discrete_map={"Perfil de risco": "#d64541", "Sem o fator": "#3a9d63", "Todas": "#4c5856"},
+                     labels={"grupo": ""})
+        fig.add_vline(x=0.5, line_dash="dash", line_color="#7a8583")
+        fig.update_layout(height=420, xaxis_range=[0.4, 0.75], legend_orientation="h")
+        st.plotly_chart(fig, width="stretch")
+        st.caption(f"O sinal funciona claramente melhor nas mulheres que **relatam dificuldade de equilíbrio** "
+                   f"(AUC {sc.get('Com dif. equilíbrio', float('nan')):.2f} contra {sc.get('Sem dif. equilíbrio', float('nan')):.2f}), "
+                   "confirmando com os sinais brutos a tendência vista antes. Para diabetes e multimorbidade a vantagem não se confirmou.")
+
+    st.markdown("#### 8. Conclusões sobre o uso do celular")
     st.markdown(f"""
 - **O sinal é real:** as medidas do celular variam com idade, diabetes (sobretudo de olhos fechados), renda e histórico de quedas, na direção esperada.
 - **Mas, sozinho, discrimina pouco no nível individual:** AUC ≈ 0,58–0,60 para queda; as perguntas simples do questionário vão melhor e o celular não acrescenta ao questionário.
 - **Melhores candidatas:** amplitude e energia de baixa/média frequência no eixo antero-posterior, de olhos abertos.
 - **As 24 medidas são muito redundantes:** o 1º componente principal resume {val['pca'][0]*100:.0f}% da informação e 4 componentes, {sum(val['pca'][:4])*100:.0f}%.
-- **Repetibilidade moderada:** a mesma pessoa de olhos abertos e fechados correlaciona só ρ ≈ 0,55–0,59, sinal de que uma única tentativa de 60 s tem bastante ruído.
-- **Para ganhar poder individual:** repetir 2–3 tentativas e usar a média; tarefas mais desafiadoras (pés juntos, tandem, apoio unipodal, dupla tarefa); padronizar piso, posição e aparelho; registrar IMC para corrigir o amortecimento; e acompanhar as participantes prospectivamente (quedas nos 12 meses **seguintes**), que é o teste definitivo de predição.
+- **Repetibilidade boa:** com os sinais brutos, duas gravações da mesma mulher concordam com ICC ≈ 0,8 nas medidas de amplitude (seção 7). A baixa correlação entre olhos abertos e fechados reflete condições diferentes, não ruído.
+- **Para ganhar poder individual:** padronizar a duração (60 s) e a orientação do aparelho em todos os municípios; tarefas mais desafiadoras (pés juntos, tandem, apoio unipodal, dupla tarefa); padronizar piso, posição e aparelho; registrar IMC para corrigir o amortecimento; e acompanhar as participantes prospectivamente (quedas nos 12 meses **seguintes**), que é o teste definitivo de predição.
 """)
 
 # ================================================================ CRUZAMENTOS
@@ -1164,6 +1295,11 @@ with abas[9]:
 **Fonte:** {len(df_all)} formulários de {df_all.mun.nunique()} municípios. Amplia o relatório técnico parcial de agosto/2026
 (11 municípios, 626 participantes). Nomes, telefones e endereços foram removidos.
 
+**Estabilometria:** os valores vêm do **sinal bruto do celular reprocessado** (reamostragem a 100 Hz, correção da orientação
+pela gravidade, filtro 0,1–10 Hz) para {(df_all.fonte_oa=="Sinal bruto reprocessado").sum()} participantes. Para as
+{(df_all.fonte_oa=="Planilha original").sum()} sem arquivo bruto válido (principalmente Santarém, gravada com protocolo de 30 s),
+usa-se o valor original da planilha convertido para a mesma escala por calibração log-linear.
+
 **Macrorregiões de Saúde** (SESPA/CIB-PA, 13 regiões em 4 macros):
 """ + "\n".join(f"- {x}" for x in mac) + """
 
@@ -1193,5 +1329,5 @@ Desempenho por validação cruzada 5×20 (pontos recalculados em cada repetiçã
     (na, ra), (nf, rf) = ols["area_oa_meta"], ols["area_of_meta"]
     st.caption(f"OA: n={na}, R²={ra*100:.1f}%. OF: n={nf}, R²={rf*100:.1f}%. Coeficiente +0,10 ≈ 10% mais área.")
     st.download_button("Baixar base desidentificada (CSV)",
-                       pd.read_csv("dados_quedas.csv").to_csv(index=False).encode("utf-8-sig"),
+                       df_all.to_csv(index=False).encode("utf-8-sig"),
                        "dados_quedas.csv", "text/csv")
