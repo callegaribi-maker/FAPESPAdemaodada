@@ -14,6 +14,9 @@ import statsmodels.api as sm
 import streamlit as st
 
 st.set_page_config(page_title="Observatório de Quedas · Pará", page_icon="📊", layout="wide")
+pd.set_option("styler.format.precision", 1)
+pd.set_option("styler.format.decimal", ",")
+pd.set_option("styler.format.thousands", ".")
 
 MACROS = ["I", "II", "III", "IV"]
 MACRO_COR = {"Macro I": "#2a78d6", "Macro II": "#eb6834", "Macro III": "#1baf7a", "Macro IV": "#eda100"}
@@ -85,6 +88,11 @@ def carregar():
                   + f(d.diabetes) + f(d.dvis) + f(d.dneu) + f(d.multimed) + f(d.hiosc))
     d["alto"] = (d.score >= 4).astype(float)
     d["risco_g"] = pd.cut(d.score, [-1, 1, 3, 99], labels=["Baixa", "Moderada", "Alta"])
+    # Índice de Risco de Quedas (IRQ-Pará), pontos derivados da regressão logística
+    d["irq"] = (np.where(d.idade >= 60, 3, np.where(d.idade >= 40, 2, 0)) + 2 * f(d.diabetes) + 2 * f(d.dequil)
+                + 2 * f(d.obst) + f(d.vertigem) + 3 * f(d.auxilio) + 2 * f(d.cores))
+    d["irq_g"] = pd.cut(d.irq, [-1, 2, 4, 6, 99], labels=["Baixo", "Moderado", "Alto", "Muito alto"])
+    d["irq_alto"] = d.irq_g.isin(["Alto", "Muito alto"]).astype(float)
     for k in BINLBL:
         d["b_" + k] = d[k].map({1: "Sim", 0: "Não"})
     return d
@@ -98,6 +106,8 @@ for k in ["queda", "lesao", "recorrente", "dequil", "vertigem", "auxilio", "mede
     M[k] = (BINLBL[k] + " (%)", "p", "Quedas e equilíbrio")
 M["alto"] = ("Vulnerabilidade alta (%)", "p", "Quedas e equilíbrio")
 M["score"] = ("Índice de vulnerabilidade (0–12)", "m", "Quedas e equilíbrio")
+M["irq"] = ("IRQ-Pará médio (0–15)", "m", "Quedas e equilíbrio")
+M["irq_alto"] = ("IRQ-Pará alto ou muito alto (%)", "p", "Quedas e equilíbrio")
 M["nquedas"] = ("Nº médio de quedas", "m", "Quedas e equilíbrio")
 for k in ["dsis", "hipert", "diabetes", "osteoart", "cardio", "respir", "depans", "dneu", "avc", "dvis",
           "catarata", "glaucoma", "refrativo", "malaria"]:
@@ -127,7 +137,7 @@ DIMS = {
     "cor": "Cor/raça", "civil": "Estado civil", "esc_g": "Escolaridade", "renda_g": "Renda familiar",
     "imc_g": "IMC", "cint_g": "Cintura", "pant_g": "Panturrilha", "pa_g": "Pressão aferida", "sono_g": "Sono",
     "nmed_g": "Nº de medicamentos", "ncom_g": "Nº de condições crônicas", "risco_g": "Vulnerabilidade a quedas",
-    "oscil_g": "Oscilação OA",
+    "oscil_g": "Oscilação OA", "irq_g": "IRQ-Pará (classe de risco)",
 }
 DIMS.update({"b_" + k: v + " (Sim/Não)" for k, v in BINLBL.items()})
 
@@ -221,6 +231,24 @@ def carregar_geo():
 GEO = carregar_geo()
 
 
+@st.cache_data
+def carregar_validacao():
+    return _json.load(open("sensor_validacao.json", encoding="utf-8"))
+
+
+def auc_mw(x, y):
+    """AUC pela estatística U de Mann-Whitney (probabilidade de um caso ter valor maior que um não caso)."""
+    from scipy import stats
+    a, b = x[y == 1], x[y == 0]
+    if len(a) < 3 or len(b) < 3:
+        return np.nan, np.nan
+    u, p = stats.mannwhitneyu(a, b)
+    return u / (len(a) * len(b)), p
+
+
+
+
+
 def _xy(feat):
     xs, ys = [], []
     for poly in feat["geometry"]["coordinates"]:
@@ -300,8 +328,8 @@ if df.empty:
     st.warning("Nenhuma participante no recorte. Ajuste os filtros na barra lateral.")
     st.stop()
 
-abas = st.tabs(["Panorama", "Municípios", "Ciclo de vida", "Fatores de risco", "Equilíbrio postural",
-                "Cruzamentos", "Método"])
+abas = st.tabs(["Panorama", "Índice de risco", "Municípios", "Ciclo de vida", "Fatores de risco", "Perfil de risco",
+                "Equilíbrio postural", "Sensor do celular", "Cruzamentos", "Método"])
 
 # ================================================================ PANORAMA
 with abas[0]:
@@ -373,6 +401,8 @@ with abas[0]:
 - **Casa:** {a.obst.mean()*100:.0f}% relatam obstáculos; quedas {obs['rp']:.1f}× mais frequentes. É o fator modificável mais forte.
 - **Cuidado:** só {orf*100:.0f}% das mulheres que caíram receberam orientação profissional sobre quedas.
 - **Macrorregião:** a diferença de queda entre macros não se sustenta após ajuste por idade e clínica (aba Fatores de risco).
+- **IRQ-Pará:** o índice de 8 perguntas classifica o risco com AUC ≈ 0,70; no risco muito alto, {a[a.irq_g=="Muito alto"].queda.mean()*100:.0f}% caíram, contra {a[a.irq_g=="Baixo"].queda.mean()*100:.0f}% no baixo (aba Índice de risco).
+- **Celular:** mede de fato o controle postural (separa bem idade e diabetes), mas sozinho prevê pouco a queda; tende a funcionar melhor em quem já tem fragilidade clínica (aba Sensor do celular).
 """)
 
     c3, c4 = st.columns(2)
@@ -396,8 +426,104 @@ with abas[0]:
         fig.update_layout(height=380, margin=dict(t=10, b=10), legend_orientation="h", xaxis_range=[0, 100])
         st.plotly_chart(fig, width="stretch")
 
-# ================================================================ MUNICÍPIOS
+# ================================================================ ÍNDICE DE RISCO (IRQ-Pará)
+IRQ_PTS = [("Idade 40–59 anos", 2), ("Idade ≥ 60 anos", 3), ("Diabetes", 2), ("Dificuldade de equilíbrio ou coordenação", 2),
+           ("Obstáculos com risco de queda em casa", 2), ("Vertigem recente", 1), ("Usa auxílio para caminhar", 3),
+           ("Dificuldade em discriminar cores", 2)]
+IRQ_COR = {"Baixo": "#3a9d63", "Moderado": "#f2b33d", "Alto": "#e8743b", "Muito alto": "#d64541"}
+IRQ_ORD = ["Baixo", "Moderado", "Alto", "Muito alto"]
+
 with abas[1]:
+    st.subheader("IRQ-Pará: Índice de Risco de Quedas")
+    st.caption("Escore de pontos construído com os dados do projeto: cada item do questionário recebe pontos proporcionais "
+               "ao seu peso na regressão logística (quanto aumenta a chance de queda, ajustado pelos demais). Soma de 0 a 15. "
+               "Não exige equipamento: pode ser aplicado por agente comunitário de saúde em 2 minutos.")
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        st.markdown("**Como pontuar**")
+        st.dataframe(pd.DataFrame(IRQ_PTS, columns=["Item", "Pontos"]), hide_index=True, width="stretch")
+        st.markdown("**Classes**")
+        st.markdown("🟢 **Baixo** 0–2 · 🟡 **Moderado** 3–4 · 🟠 **Alto** 5–6 · 🔴 **Muito alto** ≥ 7")
+    with c2:
+        st.markdown("**Calculadora**")
+        k1, k2 = st.columns(2)
+        idade_c = k1.number_input("Idade (anos)", 18, 110, 55, key="irq_idade")
+        itens = {}
+        for i, (nome, p) in enumerate(IRQ_PTS[2:]):
+            itens[nome] = (k1 if i % 2 else k2).checkbox(f"{nome} (+{p})", key=f"irq_{i}")
+        pts = (3 if idade_c >= 60 else 2 if idade_c >= 40 else 0) + sum(p for (n, p) in IRQ_PTS[2:] if itens[n])
+        cls = "Baixo" if pts <= 2 else "Moderado" if pts <= 4 else "Alto" if pts <= 6 else "Muito alto"
+        ref = df_all[df_all.irq_g == cls]
+        st.markdown(
+            f'<div style="padding:14px 18px;border-radius:10px;border:2px solid {IRQ_COR[cls]};margin-top:6px">'
+            f'<div style="font-size:2.2rem;font-weight:700;line-height:1">{pts} pontos · '
+            f'<span style="color:{IRQ_COR[cls]}">{cls}</span></div>'
+            f'<div style="margin-top:6px">No projeto, mulheres nesta classe: <b>{ref.queda.mean()*100:.0f}%</b> caíram nos '
+            f'últimos 12 meses, <b>{ref.lesao.mean()*100:.0f}%</b> com lesão (n = {len(ref)}).</div></div>',
+            unsafe_allow_html=True)
+        recs = {"Baixo": "Orientação geral sobre prevenção; reavaliar em 1 ano.",
+                "Moderado": "Orientação sobre quedas e revisão do ambiente doméstico; reavaliar em 6 meses.",
+                "Alto": "Avaliação de equilíbrio (celular/teste clínico), revisão de medicamentos e controle de doenças; adaptação da casa.",
+                "Muito alto": "Prioridade: encaminhar para fisioterapia/avaliação multiprofissional, adaptação da casa e acompanhamento próximo."}
+        st.caption("Sugestão de conduta: " + recs[cls])
+
+    st.markdown("#### Desempenho do índice")
+    g = df.groupby("irq_g", observed=True).agg(n=("queda", "size"), queda=("queda", "mean"), lesao=("lesao", "mean"),
+                                               recorrente=("recorrente", "mean"), orient=("orient", "mean")).reindex(IRQ_ORD)
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        t = g.reset_index().melt(["irq_g", "n"], ["queda", "lesao", "recorrente"], var_name="ind", value_name="pct")
+        t["pct"] *= 100
+        t["ind"] = t.ind.map({"queda": "Queda (12 meses)", "lesao": "Queda com lesão", "recorrente": "Quedas recorrentes"})
+        fig = px.bar(t, x="irq_g", y="pct", color="ind", barmode="group", hover_data=["n"],
+                     text=t.pct.round(0).astype("Int64").astype(str) + "%", category_orders={"irq_g": IRQ_ORD},
+                     color_discrete_sequence=["#d64541", "#f2b33d", "#7a3b8f"],
+                     labels={"irq_g": "Classe do IRQ-Pará", "pct": "% das mulheres na classe", "ind": ""})
+        fig.update_layout(height=400, legend_orientation="h", legend_y=-0.2)
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        v = carregar_validacao()["irq"]
+        x = df[["irq", "queda"]].dropna()
+        a_app = auc_mw(x.irq.values, x.queda.values)[0] if x.queda.nunique() == 2 else np.nan
+        st.metric("AUC no recorte atual", f"{a_app:.2f}".replace(".", ","))
+        st.metric("AUC com validação cruzada (amostra completa)", f"{v['cv_queda'][0]:.2f}".replace(".", ","),
+                  f"IC {v['cv_queda'][1]:.2f}–{v['cv_queda'][2]:.2f}".replace(".", ","), delta_color="off")
+        st.caption(f"Para quedas recorrentes: AUC {v['cv_recorrente'][0]:.2f}; com lesão: {v['cv_lesao'][0]:.2f}. "
+                   f"Acrescentar o celular (área OA ≥ {v['thr_area']:.3f}) leva a {v['cv_queda_cel'][0]:.2f}: ganho desprezível. "
+                   "Para comparação: só a idade dá 0,63 e o celular sozinho 0,60.")
+
+    st.markdown("**Escolha do ponto de corte**")
+    x = df[["irq", "queda"]].dropna()
+    linhas = []
+    for c in range(2, 9):
+        pos = x.irq >= c
+        tp, fn = (pos & (x.queda == 1)).sum(), (~pos & (x.queda == 1)).sum()
+        tn, fp = (~pos & (x.queda == 0)).sum(), (pos & (x.queda == 0)).sum()
+        linhas.append({"Corte (IRQ ≥)": c, "Mulheres sinalizadas (%)": pos.mean() * 100,
+                       "Sensibilidade (%)": tp / max(tp + fn, 1) * 100, "Especificidade (%)": tn / max(tn + fp, 1) * 100,
+                       "Quedas entre sinalizadas (%)": tp / max(tp + fp, 1) * 100})
+    st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch",
+                 column_config={k: st.column_config.NumberColumn(format="%.0f") for k in
+                                ["Mulheres sinalizadas (%)", "Sensibilidade (%)", "Especificidade (%)", "Quedas entre sinalizadas (%)"]})
+    st.caption("Corte ≥ 3 serve para triagem ampla (encontra ~8 em cada 10 que caíram); corte ≥ 5 equilibra melhor; "
+               "corte ≥ 7 seleciona poucas mulheres com risco muito alto (mais da metade caiu).")
+
+    st.markdown("#### Onde estão as mulheres de risco alto")
+    t = df.groupby("mun").irq_alto.agg(["mean", "size"]).reset_index().sort_values("mean", ascending=False)
+    t["pct"] = t["mean"] * 100
+    t["macro"] = t.mun.map(df_all.drop_duplicates("mun").set_index("mun").macro_lbl)
+    fig = px.bar(t, x="mun", y="pct", color="macro", color_discrete_map=MACRO_COR, hover_data={"size": True},
+                 labels={"pct": "% com IRQ alto ou muito alto", "mun": "", "macro": ""})
+    fig.update_layout(height=400, xaxis_categoryorder="total descending")
+    st.plotly_chart(fig, width="stretch")
+    st.caption(f"Orientação profissional sobre quedas já recebida: {g.orient.iloc[0]*100:.0f}% no risco baixo e "
+               f"{g.orient.iloc[-1]*100:.0f}% no muito alto: a orientação não está chegando a quem mais precisa.")
+    st.warning("**Limitações:** o índice foi construído e testado nos mesmos dados (a validação cruzada reduz, mas não "
+               "elimina, o otimismo) e o estudo é transversal: a queda foi perguntada sobre o ano anterior. Para uso "
+               "clínico, o IRQ-Pará precisa ser validado prospectivamente (quedas nos 12 meses seguintes) e em outras amostras.")
+
+# ================================================================ MUNICÍPIOS
+with abas[2]:
     st.subheader("Ranking de municípios")
     mk = sel_metrica("Indicador", key="rank")
     t = tabela(df, "mun", [mk]).reset_index().dropna()
@@ -428,13 +554,59 @@ with abas[1]:
             show[k] = show[k] * 100
     show = show.rename(columns={k: M[k][0] for k in ks})
     pcols = [M[k][0] for k in ks if M[k][1] == "p" and k != "orient"] + ["prioridade"]
-    st.dataframe(show.style.format(precision=1).format({M["area_oa"][0]: "{:.4f}", M["romberg"][0]: "{:.2f}",
-                                                         "prioridade": "{:.2f}"})
+    fmt_map = {c: "{:.1f}" for c in show.columns if c != "n"}
+    fmt_map.update({M["area_oa"][0]: "{:.4f}", M["romberg"][0]: "{:.2f}", "prioridade": "{:.2f}", "n": "{:.0f}"})
+    st.dataframe(show.style.format(fmt_map, na_rep="–")
                  .background_gradient(cmap="Oranges", subset=pcols),
                  width="stretch", height=620)
 
+
+    st.subheader("O que os municípios com mais quedas têm em comum")
+    st.caption("Correlação entre municípios (ecológica): cada ponto é um município. Mostra características do território, "
+               "não de cada mulher.")
+    caracts = {"idade": "Idade média", "idoso": "% com 60+ anos", "renda": "Renda média (SM)", "esc": "Escolaridade média",
+               "ncom": "Nº médio de doenças crônicas", "diabetes": "% com diabetes", "dequil": "% com dificuldade de equilíbrio",
+               "vertigem": "% com vertigem", "obst": "% com obstáculos em casa", "orient": "% que recebeu orientação",
+               "multimed": "% com ≥2 medicamentos", "area_oa": "Oscilação OA (mediana)", "irq": "IRQ-Pará médio"}
+    agg_m = df.groupby("mun").agg(queda=("queda", "mean"), n=("queda", "size"),
+                                  **{k: (k, "median" if k == "area_oa" else "mean") for k in caracts})
+    agg_m = agg_m[agg_m.n >= 10]
+    if len(agg_m) >= 6:
+        from scipy import stats as _st
+        cor = []
+        for k, l in caracts.items():
+            x = agg_m[[k, "queda"]].dropna()
+            r, p = _st.spearmanr(x[k], x.queda)
+            cor.append(dict(c=l, k=k, rho=r, p=p))
+        C = pd.DataFrame(cor).sort_values("rho")
+        C["sig"] = np.where(C.p < 0.05, "p < 0,05", "não significativo")
+        c1, c2 = st.columns(2)
+        fig = px.bar(C, x="rho", y="c", color="sig", orientation="h", hover_data={"p": ":.3f"},
+                     color_discrete_map={"p < 0,05": "#0d6b6e", "não significativo": "#b8c2bf"},
+                     labels={"rho": "Correlação com % de quedas (Spearman ρ)", "c": "", "sig": ""})
+        fig.add_vline(x=0, line_color="#7a8583")
+        fig.update_layout(height=460, legend_orientation="h", legend_y=1.08, xaxis_range=[-1, 1])
+        c1.plotly_chart(fig, width="stretch")
+        kx = c2.selectbox("Ver em detalhe", list(caracts), index=list(caracts).index("idade"), format_func=caracts.get,
+                          key="eco_x")
+        t = agg_m.reset_index()
+        t["macro"] = t.mun.map(df_all.drop_duplicates("mun").set_index("mun").macro_lbl)
+        t["queda_pct"] = t.queda * 100
+        fig = px.scatter(t, x=kx, y="queda_pct", text="mun", color="macro", color_discrete_map=MACRO_COR, size="n",
+                         size_max=16, labels={kx: caracts[kx], "queda_pct": "% de quedas", "macro": ""})
+        fig.update_traces(textposition="top center", textfont_size=10)
+        z = np.polyfit(t[kx].astype(float), t.queda_pct, 1)
+        xs = np.linspace(t[kx].min(), t[kx].max(), 20)
+        fig.add_scatter(x=xs, y=np.polyval(z, xs), mode="lines", line=dict(dash="dash", color="#4c5856"),
+                        showlegend=False, hoverinfo="skip")
+        fig.update_layout(height=430, legend_orientation="h")
+        c2.plotly_chart(fig, width="stretch")
+        st.caption("Na amostra completa: municípios com população mais velha, mais doenças crônicas, mais dificuldade de "
+                   "equilíbrio, menor renda e menor escolaridade têm mais quedas. Com só 22 municípios, correlações "
+                   "abaixo de ~0,42 não atingem significância.")
+
 # ================================================================ CICLO DE VIDA
-with abas[2]:
+with abas[3]:
     dv = filtrar(df_all, ignorar=("faixa",))
     st.subheader("O risco ao longo da vida")
     modo = st.radio("Modo", ["Vários indicadores", "Um indicador × macrorregião"], horizontal=True)
@@ -487,8 +659,7 @@ with abas[2]:
     for k in ks:
         if M[k][1] == "p":
             t[k] = t[k] * 100
-    st.dataframe(t.rename(columns={k: M[k][0] for k in ks}).style.format(precision=1)
-                 .format({M["area_oa"][0]: "{:.4f}", M["area_of"][0]: "{:.4f}", M["romberg"][0]: "{:.2f}"}),
+    st.dataframe(t.rename(columns={k: M[k][0] for k in ks}).style.format({M["area_oa"][0]: "{:.4f}", M["area_of"][0]: "{:.4f}", M["romberg"][0]: "{:.2f}"}),
                  width="stretch")
 
 # ================================================================ FATORES
@@ -540,7 +711,7 @@ def modelos():
     return res, ols
 
 
-with abas[3]:
+with abas[4]:
     c1, c2 = st.columns([7, 5])
     with c1:
         st.subheader("O que acompanha o desfecho")
@@ -590,8 +761,150 @@ with abas[3]:
     fig.update_layout(height=440, legend_orientation="h")
     st.plotly_chart(fig, width="stretch")
 
+
+    st.subheader("Gradientes: o risco sobe degrau a degrau")
+    c1, c2 = st.columns(2)
+    t = df.assign(ncomg=df.ncom.clip(upper=3).map({0: "0", 1: "1", 2: "2", 3: "3+"})).groupby("ncomg").queda.agg(["mean", "size"]).reset_index()
+    fig = px.bar(t, x="ncomg", y=t["mean"] * 100, text=(t["mean"] * 100).round(0).astype(int).astype(str) + "%",
+                 hover_data={"size": True}, color_discrete_sequence=["#d64541"],
+                 labels={"ncomg": "Nº de doenças crônicas", "y": "% que caiu"})
+    fig.update_xaxes(type="category"); fig.update_layout(height=340, yaxis_title="% que caiu")
+    c1.plotly_chart(fig, width="stretch")
+    t = df.groupby("faixa", observed=True).queda.agg(["mean", "size"]).reset_index()
+    fig = px.bar(t, x="faixa", y=t["mean"] * 100, text=(t["mean"] * 100).round(0).astype(int).astype(str) + "%",
+                 hover_data={"size": True}, color_discrete_sequence=["#d64541"], labels={"faixa": "Faixa etária"})
+    fig.update_layout(height=340, yaxis_title="% que caiu")
+    c2.plotly_chart(fig, width="stretch")
+
+    st.subheader("Correlações individuais")
+    st.caption("Spearman entre características de cada participante. |ρ| < 0,1 desprezível; 0,1–0,3 fraca; 0,3–0,5 moderada. "
+               "Em desfechos com muitas causas, como a queda, correlações fracas são esperadas.")
+    cvars = {"idade": "Idade", "renda": "Renda", "esc": "Escolaridade", "imc": "IMC", "cintura": "Cintura",
+             "panturrilha": "Panturrilha", "pas": "PA sistólica", "sono": "Horas de sono", "nmed": "Nº medicamentos",
+             "ncom": "Nº doenças", "irq": "IRQ-Pará", "queda": "Queda", "nquedas": "Nº quedas", "dequil": "Dif. equilíbrio",
+             "vertigem": "Vertigem", "area_oa": "Área OA", "area_of": "Área OF", "romberg": "Romberg"}
+    Cm = df[list(cvars)].corr("spearman").rename(index=cvars, columns=cvars)
+    fig = px.imshow(Cm, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-0.6, zmax=0.6, aspect="auto",
+                    labels={"color": "ρ"})
+    fig.update_layout(height=640)
+    st.plotly_chart(fig, width="stretch")
+
+# ================================================================ PERFIL DE RISCO
+MARC = {"idoso": "Idade ≥ 60", "diabetes": "Diabetes", "dequil": "Dificuldade de equilíbrio", "obst": "Obstáculos em casa",
+        "com2": "≥ 2 doenças crônicas", "multimed": "≥ 2 medicamentos"}
+
+with abas[5]:
+    st.subheader("Perfil de risco: quanto mais fatores, mais quedas")
+    st.caption("Seis marcadores simples, todos obtidos no questionário: idade ≥ 60, diabetes, dificuldade de equilíbrio "
+               "relatada, obstáculos em casa, duas ou mais doenças crônicas e uso de dois ou mais medicamentos. "
+               "São os fatores que se mantiveram associados à queda no modelo ajustado ou que mostraram gradiente claro.")
+    dp = df.copy()
+    dp["com2"] = (dp.ncom >= 2).astype(float)
+    dp["nf"] = sum(dp[k].fillna(0) for k in MARC)
+    dp["nf_g"] = dp.nf.clip(upper=4).map({0: "0", 1: "1", 2: "2", 3: "3", 4: "4 ou mais"})
+    ordem_nf = ["0", "1", "2", "3", "4 ou mais"]
+    g = dp.groupby("nf_g").agg(queda=("queda", "mean"), lesao=("lesao", "mean"), recorrente=("recorrente", "mean"),
+                               n=("queda", "size")).reindex(ordem_nf).reset_index()
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        t = g.melt(["nf_g", "n"], ["queda", "lesao", "recorrente"], var_name="ind", value_name="pct")
+        t["pct"] *= 100
+        t["ind"] = t.ind.map({"queda": "Queda (12 meses)", "lesao": "Queda com lesão", "recorrente": "Quedas recorrentes"})
+        fig = px.bar(t, x="nf_g", y="pct", color="ind", barmode="group", hover_data=["n"],
+                     text=t.pct.round(0).astype("Int64").astype(str) + "%",
+                     color_discrete_sequence=["#d64541", "#f2b33d", "#7a3b8f"],
+                     category_orders={"nf_g": ordem_nf},
+                     labels={"nf_g": "Número de marcadores de risco", "pct": "%", "ind": ""})
+        fig.update_xaxes(type="category")
+        fig.update_layout(height=420, legend_orientation="h", legend_y=-0.2)
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        base = g.queda.iloc[0]
+        st.markdown("**Como ler**")
+        st.markdown("\n".join(
+            f"- **{r.nf_g} marcador{'es' if r.nf_g != '1' else ''}:** {r.queda*100:.0f}% caíram"
+            + (f" ({r.queda/base:.1f}× o grupo sem marcadores)" if i and base > 0 else "") + f" · n = {r.n}"
+            for i, r in enumerate(g.itertuples()) if r.n > 0))
+        st.caption("Na amostra completa, a queda vai de cerca de 13% (nenhum marcador) a 55% (4 ou mais): "
+                   "o gradiente mais forte de todo o estudo.")
+
+    st.markdown("#### Quem são as mulheres em cada nível de risco")
+    t = dp.groupby("nf_g").agg(idade=("idade", "mean"), renda=("renda", "median"), esc=("baixaesc", "mean"),
+                               orient=("orient", "mean"), alto=("alto", "mean"), area=("area_oa", "median"),
+                               n=("queda", "size")).reindex(ordem_nf)
+    t["esc"] *= 100; t["orient"] *= 100
+    st.dataframe(t.drop(columns="alto").rename(columns={"idade": "Idade média", "renda": "Renda mediana (SM)",
+                 "esc": "Até fund. incompleto (%)", "orient": "Recebeu orientação (%)", "area": "Área elipse OA (mediana)",
+                 "n": "n"}).rename_axis("Marcadores de risco").style.format({"Idade média": "{:.0f}", "Renda mediana (SM)": "{:.1f}",
+                 "Até fund. incompleto (%)": "{:.0f}", "Recebeu orientação (%)": "{:.0f}",
+                 "Área elipse OA (mediana)": "{:.4f}"}), width="stretch")
+    st.caption("A orientação profissional sobre quedas não acompanha o risco: quem acumula mais fatores não "
+               "recebe proporcionalmente mais orientação.")
+
+    st.markdown("#### Combinação idade × carga de doenças")
+    dp["ncom_g"] = dp.ncom.clip(upper=3).map({0: "0", 1: "1", 2: "2", 3: "3+"})
+    dp["faixa3"] = pd.cut(dp.idade, [0, 39.99, 59.99, 200], labels=["< 40", "40–59", "≥ 60"])
+    pv = dp.pivot_table(index="faixa3", columns="ncom_g", values="queda", aggfunc="mean", observed=True) * 100
+    cn = dp.pivot_table(index="faixa3", columns="ncom_g", values="queda", aggfunc="count", observed=True)
+    fig = px.imshow(pv.where(cn >= 10), text_auto=".0f", color_continuous_scale=[[0, "#3a9d63"], [.5, "#f2b33d"], [1, "#d64541"]],
+                    labels={"x": "Nº de doenças crônicas", "y": "Idade", "color": "% queda"}, aspect="auto")
+    fig.update_xaxes(type="category"); fig.update_yaxes(type="category")
+    fig.update_layout(height=320)
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Células com menos de 10 participantes ficam em branco.")
+
+    st.markdown("#### O celular funciona melhor no perfil de risco?")
+    st.caption("Para cada subgrupo: AUC da área da elipse de olhos abertos para separar quem caiu (0,5 = acaso) e "
+               "quanto a chance de queda sobe a cada aumento de 1 desvio-padrão na oscilação (OR).")
+    import statsmodels.formula.api as smf
+    dp["z_area"] = np.log(dp.area_oa)
+    dp["z_area"] = (dp.z_area - dp.z_area.mean()) / dp.z_area.std()
+    subs = [("Todas", dp.index == dp.index), ("Sem dificuldade de equilíbrio", dp.dequil == 0),
+            ("Com dificuldade de equilíbrio", dp.dequil == 1), ("Sem diabetes", dp.diabetes == 0),
+            ("Com diabetes", dp.diabetes == 1), ("0–1 doença crônica", dp.ncom <= 1), ("≥ 2 doenças crônicas", dp.ncom >= 2),
+            ("Sem vertigem", dp.vertigem == 0), ("Com vertigem", dp.vertigem == 1), ("< 60 anos", dp.idade < 60),
+            ("≥ 60 anos", dp.idade >= 60), ("0–1 marcador de risco", dp.nf <= 1), ("≥ 2 marcadores de risco", dp.nf >= 2)]
+    lin = []
+    for nome, mask in subs:
+        x = dp.loc[mask, ["z_area", "queda"]].dropna()
+        if x.queda.sum() < 10 or (x.queda == 0).sum() < 10:
+            continue
+        a, p = auc_mw(x.z_area.values, x.queda.values)
+        try:
+            m = smf.logit("queda ~ z_area", data=x).fit(disp=0)
+            o, lo, hi = np.exp(m.params.z_area), *np.exp(m.conf_int().loc["z_area"])
+        except Exception:
+            o = lo = hi = np.nan
+        lin.append(dict(Subgrupo=nome, n=len(x), Quedas=int(x.queda.sum()), AUC=a, OR=o, lo=lo, hi=hi))
+    T = pd.DataFrame(lin)
+    if not T.empty:
+        T["grupo"] = np.where(T.Subgrupo.str.startswith(("Com ", "≥")), "Perfil de risco",
+                              np.where(T.Subgrupo == "Todas", "Todas", "Sem o fator"))
+        fig = px.scatter(T, x="AUC", y="Subgrupo", color="grupo", size="n", size_max=18,
+                         color_discrete_map={"Perfil de risco": "#d64541", "Sem o fator": "#3a9d63", "Todas": "#4c5856"},
+                         hover_data={"n": True, "Quedas": True, "OR": ":.2f"}, labels={"grupo": ""})
+        fig.add_vline(x=0.5, line_dash="dash", line_color="#7a8583", annotation_text="acaso")
+        fig.update_layout(height=460, xaxis_range=[0.4, 0.75], legend_orientation="h",
+                          yaxis_categoryorder="array", yaxis_categoryarray=T.Subgrupo.tolist()[::-1])
+        st.plotly_chart(fig, width="stretch")
+        st.dataframe(T.drop(columns="grupo").rename(columns={"lo": "OR IC inf.", "hi": "OR IC sup."}), hide_index=True,
+                     width="stretch", column_config={c: st.column_config.NumberColumn(format="%.2f")
+                                                     for c in ["AUC", "OR", "OR IC inf.", "OR IC sup."]})
+    st.info("**Leitura:** nos grupos com fragilidade clínica (dificuldade de equilíbrio, diabetes, várias doenças, "
+            "vertigem) a oscilação medida pelo celular separa melhor quem caiu (AUC ≈ 0,61–0,65 contra ≈ 0,55 nos "
+            "demais) e pesa mais na chance de queda. A idade sozinha não muda o desempenho. A diferença entre grupos "
+            "ainda não é estatisticamente confirmada (interação p ≈ 0,2–0,3), por isso é uma tendência a confirmar "
+            "com mais mulheres frágeis e acompanhamento de quedas futuras.")
+
+    st.markdown("#### Recomendação: triagem em duas etapas")
+    st.markdown("""
+1. **Questionário rápido para todas** (os 6 marcadores acima). Com 2 ou mais marcadores, a mulher entra no grupo de atenção.
+2. **Exame com o celular no grupo de atenção**, onde a oscilação medida discrimina melhor, para graduar a prioridade.
+3. **Ação imediata em quem tem ≥ 3 marcadores**: orientação sobre quedas, revisão de medicamentos, controle do diabetes e adaptação da casa (o único fator forte totalmente modificável).
+""")
+
 # ================================================================ EQUILÍBRIO
-with abas[4]:
+with abas[6]:
     st.subheader("Estabilometria por grupo")
     st.caption("Medianas. Valores maiores = mais oscilação = pior controle postural.")
     c1, c2 = st.columns(2)
@@ -629,8 +942,178 @@ with abas[4]:
         fig.update_layout(height=380, legend_orientation="h")
         st.plotly_chart(fig, width="stretch")
 
+# ================================================================ SENSOR DO CELULAR
+SENS_BASE = ["RMS AP", "RMS ML", "Desvio total", "Área elipse", "Freq. mediana AP", "Freq. mediana ML",
+             "Energia baixa AP", "Energia média AP", "Energia alta AP", "Energia baixa ML", "Energia média ML",
+             "Energia alta ML"]
+SENS_OUT = {"queda": "Queda (12 meses)", "recorrente": "Quedas recorrentes (≥2)", "lesao": "Queda com lesão",
+            "dequil": "Dificuldade de equilíbrio (relato)", "idoso": "Idade ≥ 60", "diabetes": "Diabetes",
+            "dvis": "Doença visual"}
+
+
+
+with abas[7]:
+    st.subheader("O celular ajuda a identificar quem está em risco?")
+    st.caption("O smartphone (aplicativo Momentum Sensors, na lombar, 60 s de olhos abertos e 60 s de olhos fechados) "
+               "gera 12 medidas por condição: amplitude (RMS, desvio total, área da elipse), frequência mediana e "
+               "energia em três faixas (0–0,5 Hz, 0,5–2 Hz, 2–8 Hz), nos eixos antero-posterior (AP) e médio-lateral (ML).")
+
+    val = carregar_validacao()
+    st.markdown("#### 1. Capacidade de distinguir, testada com validação cruzada")
+    st.caption("AUC = probabilidade de o modelo dar escore maior a quem teve o desfecho do que a quem não teve. "
+               "0,5 = sorteio; 0,6 = fraco; 0,7 = razoável; 0,8 = bom. Validação cruzada 5×10 (amostra completa).")
+    linhas = []
+    for y, lab in [("queda", "Queda"), ("recorrente", "Quedas recorrentes"), ("lesao", "Queda com lesão"),
+                   ("idoso", "Idade ≥ 60"), ("diabetes", "Diabetes")]:
+        for nome, v in val["cv"][y].items():
+            linhas.append(dict(desfecho=lab, modelo=nome, auc=v[0], lo=v[1], hi=v[2]))
+    t = pd.DataFrame(linhas)
+    cores_mod = {"Só idade": "#9aa5a2", "Questionário (sem sintomas)": "#86b6ef", "Questionário completo": "#2a78d6",
+                 "Só celular": "#eb6834", "Só celular (random forest)": "#f2a07a", "Questionário + celular": "#0d6b6e",
+                 "Idade + celular": "#0d6b6e"}
+    fig = px.bar(t, x="auc", y="desfecho", color="modelo", barmode="group", orientation="h",
+                 error_x=t.hi - t.auc, error_x_minus=t.auc - t.lo, color_discrete_map=cores_mod,
+                 labels={"auc": "AUC (validação cruzada)", "desfecho": "", "modelo": ""})
+    fig.add_vline(x=0.5, line_dash="dash", line_color="#7a8583", annotation_text="acaso")
+    fig.add_vline(x=0.7, line_dash="dot", line_color="#3a9d63", annotation_text="razoável")
+    fig.update_layout(height=520, xaxis_range=[0.4, 0.85], legend_orientation="h", legend_y=-0.15)
+    st.plotly_chart(fig, width="stretch")
+    q = val["cv"]["queda"]
+    st.info(
+        f"**Leitura:** para quedas, o celular sozinho acerta pouco acima do acaso (AUC {q['Só celular'][0]:.2f}); "
+        f"o questionário vai melhor ({q['Questionário completo'][0]:.2f}) e somar o celular ao questionário "
+        f"não melhora ({q['Questionário + celular'][0]:.2f}). Onde o sinal do celular é mais forte é no "
+        f"envelhecimento (AUC {val['cv']['idoso']['Só celular'][0]:.2f} para separar quem tem 60+), ou seja, "
+        "ele mede de fato uma perda de controle postural, mas essa perda, num único exame de 60 s, ainda não "
+        "identifica sozinha a pessoa que vai cair.")
+
+    st.markdown("#### 2. Qual medida do celular separa melhor? (recalculado com os filtros)")
+    c1, c2 = st.columns([1, 2])
+    yk = c1.selectbox("Desfecho", list(SENS_OUT), format_func=SENS_OUT.get, key="s_out")
+    dS = df.copy()
+    dS["idoso"] = (dS.idade >= 60).astype(float).where(dS.idade.notna())
+    lin = []
+    for b in SENS_BASE:
+        for cond in ["OA", "OF"]:
+            col = f"s_{b} ({cond})"
+            x = dS[[col, yk]].dropna()
+            if x[yk].nunique() < 2:
+                continue
+            a, p = auc_mw(x[col].values, x[yk].values)
+            lin.append(dict(medida=b, cond="Olhos abertos" if cond == "OA" else "Olhos fechados", auc=a, p=p,
+                            n=len(x), casos=int(x[yk].sum()),
+                            med_com=x.loc[x[yk] == 1, col].median(), med_sem=x.loc[x[yk] == 0, col].median()))
+    A = pd.DataFrame(lin)
+    if A.empty:
+        st.warning("Poucos casos no recorte para calcular.")
+    else:
+        A["força"] = pd.cut((A.auc - 0.5).abs(), [-1, 0.03, 0.07, 0.12, 1],
+                            labels=["Nenhuma", "Muito fraca", "Fraca", "Moderada"])
+        A["sig"] = np.where(A.p < 0.05, "p < 0,05", "n.s.")
+        fig = px.bar(A.sort_values("auc"), x="auc", y="medida", color="cond", barmode="group", orientation="h",
+                     color_discrete_sequence=["#2a78d6", "#eb6834"], hover_data=["p", "n", "casos"],
+                     labels={"auc": "AUC (>0,5 = valor maior em quem tem o desfecho)", "medida": "", "cond": ""})
+        fig.add_vline(x=0.5, line_dash="dash", line_color="#7a8583")
+        fig.update_layout(height=560, xaxis_range=[0.3, 0.8], legend_orientation="h")
+        c2.plotly_chart(fig, width="stretch")
+        top = A.assign(d=(A.auc - .5).abs()).sort_values("d", ascending=False).head(6)
+        c1.markdown("**Melhores medidas**")
+        c1.dataframe(top[["medida", "cond", "auc", "força", "sig"]].rename(columns={"cond": "condição", "auc": "AUC"}),
+                     hide_index=True, width="stretch", column_config={"AUC": st.column_config.NumberColumn(format="%.2f")})
+        c1.caption("As medidas do eixo **antero-posterior** (frente-trás) e de **baixa/média frequência** "
+                   "costumam ser as mais informativas.")
+
+    st.markdown("#### 3. Existe um ponto de corte? Quedas por quintil da medida")
+    c1, c2 = st.columns([1, 2])
+    mb = c1.selectbox("Medida", SENS_BASE, index=SENS_BASE.index("Área elipse"), key="s_q")
+    cnd = c1.radio("Condição", ["OA", "OF"], horizontal=True, key="s_qc",
+                   format_func={"OA": "Olhos abertos", "OF": "Olhos fechados"}.get)
+    yq = c1.selectbox("Desfecho", list(SENS_OUT)[:4], format_func=SENS_OUT.get, key="s_qy")
+    x = df[[f"s_{mb} ({cnd})", yq, "idade"]].dropna()
+    if len(x) >= 50:
+        x["quintil"] = pd.qcut(x.iloc[:, 0], 5, labels=["Q1 (menor)", "Q2", "Q3", "Q4", "Q5 (maior)"])
+        g = x.groupby("quintil", observed=True).agg(pct=(yq, "mean"), n=(yq, "size"), idade=("idade", "mean")).reset_index()
+        g["pct"] *= 100
+        fig = px.bar(g, x="quintil", y="pct", text=g.pct.round(1).astype(str) + "%", hover_data=["n", "idade"],
+                     labels={"pct": f"{SENS_OUT[yq]} (%)", "quintil": f"Quintil de {mb} ({cnd})"},
+                     color_discrete_sequence=["#0d6b6e"])
+        fig.update_layout(height=360)
+        c2.plotly_chart(fig, width="stretch")
+        c1.caption("Na amostra completa, a área da elipse de olhos abertos mostra um **degrau**: ~18% de quedas "
+                   "nos três quintis inferiores e ~30% nos dois superiores. Acima de 0,021 u.a. (percentil 60) a "
+                   "sensibilidade é ~52% e a especificidade ~64%, útil para triagem de grupo, insuficiente para "
+                   "diagnóstico individual.")
+
+    st.markdown("#### 4. O que interfere no sinal do celular")
+    fat = {"idade": "Idade", "imc": "IMC", "cintura": "Cintura", "panturrilha": "Panturrilha", "renda": "Renda",
+           "esc": "Escolaridade", "ncom": "Nº doenças crônicas", "nmed": "Nº medicamentos", "nquedas": "Nº de quedas"}
+    mat = []
+    for b in SENS_BASE:
+        for cnd in ["OA", "OF"]:
+            col = f"s_{b} ({cnd})"
+            mat.append([df[[col, f]].dropna().corr("spearman").iloc[0, 1] for f in fat])
+    H = pd.DataFrame(mat, index=[f"{b} ({c})" for b in SENS_BASE for c in ["OA", "OF"]], columns=list(fat.values()))
+    fig = px.imshow(H, color_continuous_scale="RdBu_r", zmin=-0.4, zmax=0.4, text_auto=".2f", aspect="auto",
+                    labels={"color": "Spearman ρ"})
+    fig.update_layout(height=720)
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Destaques na amostra completa: a **energia de alta frequência AP cai com o IMC e a cintura** "
+               "(ρ ≈ −0,35): o tecido da região lombar amortece o sinal do aparelho, então o corpo da participante "
+               "interfere na medida. A **energia de média frequência AP sobe com a idade** (ρ ≈ +0,22) e é a "
+               "melhor marcadora de envelhecimento do equilíbrio.")
+
+    st.markdown("#### 5. Efeito do local de coleta")
+    t = df[["mun", "s_Área elipse (OA)"]].dropna()
+    ordem = t.groupby("mun")["s_Área elipse (OA)"].median().sort_values().index.tolist()
+    fig = px.box(t, x="mun", y="s_Área elipse (OA)", log_y=True, category_orders={"mun": ordem}, points=False,
+                 color_discrete_sequence=["#0d6b6e"], labels={"mun": "", "s_Área elipse (OA)": "Área elipse OA (log)"})
+    fig.update_layout(height=420)
+    st.plotly_chart(fig, width="stretch")
+    st.caption("O município explica ~11% da variação da área da elipse (Kruskal-Wallis p < 0,001). Mesmo "
+               "ajustando idade e IMC, Santarém mede ~2,5× a área de Belém. Parte disso pode ser real, mas parte "
+               "pode vir das condições de coleta (piso, ruído, aparelho, equipe), o que pede padronização e "
+               "registro dessas condições.")
+
+    st.markdown("#### 6. As 24 medidas repetem a mesma informação")
+    st.caption("Quem balança muito tem, ao mesmo tempo, RMS alto, desvio total alto, área grande e energia de baixa "
+               "frequência alta. Correlações acima de 0,85 significam que, sabendo uma, praticamente se sabe a outra.")
+    c1, c2 = st.columns([3, 2])
+    cols_oa = [f"s_{b} (OA)" for b in SENS_BASE]
+    R = df[cols_oa].corr("spearman")
+    R.index = R.columns = SENS_BASE
+    fig = px.imshow(R, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1, aspect="auto",
+                    labels={"color": "ρ"})
+    fig.update_layout(height=520, title="Correlação entre as medidas (olhos abertos)")
+    c1.plotly_chart(fig, width="stretch")
+    pv = carregar_validacao()["pca"][:8]
+    t = pd.DataFrame({"Componente": [f"C{i+1}" for i in range(len(pv))], "Informação (%)": np.array(pv) * 100})
+    t["Acumulado (%)"] = t["Informação (%)"].cumsum()
+    fig = px.bar(t, x="Componente", y="Informação (%)", text=t["Acumulado (%)"].round(0).astype(int).astype(str) + "% acum.",
+                 color_discrete_sequence=["#0d6b6e"])
+    fig.update_layout(height=360, title="Quanto cada 'super-medida' resume (24 medidas)")
+    c2.plotly_chart(fig, width="stretch")
+    c2.markdown("""
+**Na prática, o celular mede 4 aspectos:**
+1. **Quanto o corpo balança**: área, RMS, desvio total, energia baixa (o principal)
+2. **Quão rápido oscila**: frequência mediana
+3. **Tremores rápidos**: energia alta (2–8 Hz), sensível ao IMC
+4. **Quanto piora ao fechar os olhos**: Romberg (OF ÷ OA)
+
+Para o artigo, use um representante de cada aspecto em vez das 24 medidas.
+""")
+
+    st.markdown("#### 7. Conclusões sobre o uso do celular")
+    st.markdown(f"""
+- **O sinal é real:** as medidas do celular variam com idade, diabetes (sobretudo de olhos fechados), renda e histórico de quedas, na direção esperada.
+- **Mas, sozinho, discrimina pouco no nível individual:** AUC ≈ 0,58–0,60 para queda; as perguntas simples do questionário vão melhor e o celular não acrescenta ao questionário.
+- **Melhores candidatas:** amplitude e energia de baixa/média frequência no eixo antero-posterior, de olhos abertos.
+- **As 24 medidas são muito redundantes:** o 1º componente principal resume {val['pca'][0]*100:.0f}% da informação e 4 componentes, {sum(val['pca'][:4])*100:.0f}%.
+- **Repetibilidade moderada:** a mesma pessoa de olhos abertos e fechados correlaciona só ρ ≈ 0,55–0,59, sinal de que uma única tentativa de 60 s tem bastante ruído.
+- **Para ganhar poder individual:** repetir 2–3 tentativas e usar a média; tarefas mais desafiadoras (pés juntos, tandem, apoio unipodal, dupla tarefa); padronizar piso, posição e aparelho; registrar IMC para corrigir o amortecimento; e acompanhar as participantes prospectivamente (quedas nos 12 meses **seguintes**), que é o teste definitivo de predição.
+""")
+
 # ================================================================ CRUZAMENTOS
-with abas[5]:
+with abas[8]:
     st.subheader("Tabela de cruzamentos")
     st.caption("Combine quaisquer duas dimensões e um indicador. Células com menos de 10 participantes ficam em branco.")
     c1, c2, c3 = st.columns(3)
@@ -650,7 +1133,7 @@ with abas[5]:
         val = val.where(cnt >= 10) * escala(mk)
         val["Total"] = df.groupby(rdim, observed=True)[mk].agg(fn) * escala(mk)
     prec = 4 if mk in ("area_oa", "area_of") else 1
-    st.dataframe(val.style.format(precision=prec, na_rep="–").background_gradient(cmap="Oranges", axis=None),
+    st.dataframe(val.style.format(precision=prec, na_rep="–", decimal=",").background_gradient(cmap="Oranges", axis=None),
                  width="stretch")
     with st.expander("Ver número de participantes por célula"):
         st.dataframe(cnt, width="stretch")
@@ -663,7 +1146,7 @@ with abas[5]:
     st.download_button("Baixar tabela (CSV)", val.to_csv().encode("utf-8-sig"), "cruzamento.csv", "text/csv")
 
 # ================================================================ MÉTODO
-with abas[6]:
+with abas[9]:
     st.subheader("Como os dados foram tratados")
     mac = df_all.drop_duplicates("mun").groupby("macro_lbl").apply(
         lambda g: f"**{g.name}** ({', '.join(sorted(g.reg.unique()))}): {', '.join(sorted(g.mun))}")
@@ -681,6 +1164,11 @@ with abas[6]:
 - **Índice de vulnerabilidade a quedas** (exploratório, não validado): soma de 12 marcadores (idade ≥60, queda prévia,
   dificuldade de equilíbrio, vertigem, auxílio para caminhar, medicação que altera equilíbrio, obstáculos em casa, diabetes,
   doença visual, doença neurológica, ≥2 medicamentos, oscilação OA no quartil superior). Baixa 0–1, moderada 2–3, alta ≥4.
+
+**IRQ-Pará (Índice de Risco de Quedas):** regressão logística com os itens do questionário; os coeficientes foram
+divididos pelo menor efeito relevante e arredondados para pontos inteiros (idade 40–59 = 2, ≥60 = 3, diabetes = 2,
+dificuldade de equilíbrio = 2, obstáculos em casa = 2, vertigem = 1, auxílio para caminhar = 3, dificuldade com cores = 2).
+Desempenho por validação cruzada 5×20 (pontos recalculados em cada repetição).
 
 **Estatística**
 - Estabilometria resumida por mediana (distribuições com cauda longa).
