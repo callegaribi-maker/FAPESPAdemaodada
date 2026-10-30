@@ -1375,35 +1375,51 @@ with abas[8]:
                 if len(APa) < 5 or len(APb) < 5:
                     st.info("Poucas trajetórias em um dos grupos.")
                 else:
-                    L = float(np.nanpercentile(np.abs(np.concatenate([APa.ravel(), APb.ravel()])), 98))
-                    Lm = float(np.nanpercentile(np.abs(np.concatenate([MLa.ravel(), MLb.ravel()])), 98))
-                    L = max(L, Lm)
-                    bins = np.linspace(-L, L, 41)
-
-                    def dens(AP, ML):
-                        H = np.zeros((40, 40))
-                        for a_, m_ in zip(AP, ML):
-                            h, _, _ = np.histogram2d(a_, m_, bins=[bins, bins])
-                            H += h / max(h.sum(), 1)
-                        return H / len(AP)
-
-                    Ha, Hb = dens(APa, MLa), dens(APb, MLb)
-                    cent = (bins[:-1] + bins[1:]) / 2
+                    e1, e2 = st.columns(2)
+                    modo_esc = e1.radio("Escala dos estabilogramas", ["livre", "comum"], horizontal=True, key="est_escala",
+                                      format_func={"livre": "Livre (cada grupo se ajusta)",
+                                                   "comum": "Comum (mesma escala, para comparar tamanhos)"}.get)
+                    zoom = e2.slider("Enquadramento (% dos pontos visíveis)", 90.0, 100.0, 99.0, 0.5, key="est_zoom",
+                                     help="Menor = aproxima o centro; 100 = mostra até os pontos mais extremos.")
+                    prop = e1.checkbox("Manter a proporção real entre os eixos (forma verdadeira da oscilação)", value=True,
+                                       key="est_prop",
+                                       help="Desmarque para esticar cada eixo e ver detalhes da oscilação lateral, que é menor.")
 
                     def elipse(AP, ML):
                         C = np.mean([np.cov(np.vstack([m_, a_])) for a_, m_ in zip(AP, ML)], axis=0)
                         w, v = np.linalg.eigh(C)
                         t = np.linspace(0, 2 * np.pi, 120)
-                        E = (v @ np.diag(np.sqrt(5.991 * w)) @ np.vstack([np.cos(t), np.sin(t)]))
+                        E = (v @ np.diag(np.sqrt(5.991 * np.clip(w, 0, None))) @ np.vstack([np.cos(t), np.sin(t)]))
                         return E[0], E[1]
+
+                    def limites(AP, ML):
+                        ex, ey = elipse(AP, ML)
+                        la = max(float(np.nanpercentile(np.abs(AP), zoom)), float(np.max(np.abs(ey)))) * 1.08
+                        lm = max(float(np.nanpercentile(np.abs(ML), zoom)), float(np.max(np.abs(ex)))) * 1.08
+                        return la, lm
+
+                    la_a, lm_a = limites(APa, MLa)
+                    la_b, lm_b = limites(APb, MLb)
+                    LA_c, LM_c = max(la_a, la_b), max(lm_a, lm_b)
+
+                    def dens(AP, ML, la, lm, nb=40):
+                        ba, bm = np.linspace(-la, la, nb + 1), np.linspace(-lm, lm, nb + 1)
+                        H = np.zeros((nb, nb))
+                        for a_, m_ in zip(AP, ML):
+                            h, _, _ = np.histogram2d(a_, m_, bins=[ba, bm])
+                            H += h / max(len(a_), 1)
+                        return H / len(AP), (ba[:-1] + ba[1:]) / 2, (bm[:-1] + bm[1:]) / 2
 
                     def representante(grupo, ids):
                         v = de.set_index("id").loc[ids, col]
                         alvo = v.median()
                         return (v - alvo).abs().idxmin()
 
-                    def painel(H, AP, ML, ids, grupo, cor):
-                        fig = go.Figure(go.Heatmap(x=cent, y=cent, z=np.log10(H + 1e-5), colorscale="Blues", showscale=False,
+                    def painel(AP, ML, ids, grupo, cor, la, lm):
+                        if prop:
+                            la = lm = max(la, lm)
+                        H, ca, cm = dens(AP, ML, la, lm)
+                        fig = go.Figure(go.Heatmap(x=cm, y=ca, z=np.log10(H + 1e-5), colorscale="Blues", showscale=False,
                                                    hoverinfo="skip"))
                         ex, ey = elipse(AP, ML)
                         fig.add_scatter(x=ex, y=ey, mode="lines", line=dict(color=cor, width=3), name="Elipse 95% do grupo")
@@ -1411,16 +1427,30 @@ with abas[8]:
                         j = int(idx[rid])
                         fig.add_scatter(x=TR["ml"][j], y=TR["ap"][j], mode="lines", line=dict(color="#14201f", width=1),
                                         opacity=0.75, name="Participante típica")
-                        fig.update_layout(height=470, margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h", y=-0.22),
+                        fig.update_layout(height=520, margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h", y=-0.2),
                                           title=f"{grupo} (n = {len(AP)})",
-                                          xaxis=dict(range=[-L, L], title="Médio-lateral (m/s²)", zeroline=True),
-                                          yaxis=dict(range=[-L, L], title="Antero-posterior (m/s²)", scaleanchor="x"))
+                                          xaxis=dict(range=[-lm, lm], title="Médio-lateral (m/s²)", zeroline=True,
+                                                     constrain="domain"),
+                                          yaxis=dict(range=[-la, la], title="Antero-posterior (m/s²)", constrain="domain",
+                                                     **({"scaleanchor": "x"} if prop else {})))
                         return fig
 
+                    if modo_esc == "comum":
+                        lims_a, lims_b = (LA_c, LM_c), (LA_c, LM_c)
+                    else:
+                        lims_a, lims_b = (la_a, lm_a), (la_b, lm_b)
+                    if prop:
+                        LA_c = LM_c = max(LA_c, LM_c)
+                    Ha, ca_c, cm_c = dens(APa, MLa, LA_c, LM_c)
+                    Hb, _, _ = dens(APb, MLb, LA_c, LM_c)
+                    L, Lml = LA_c, LM_c
+
                     p1, p2 = st.columns(2)
-                    p1.plotly_chart(painel(Ha, APa, MLa, idsA, gA, "#3a9d63"), width="stretch")
-                    p2.plotly_chart(painel(Hb, APb, MLb, idsB, gB, "#d64541"), width="stretch")
-                    st.caption("Fundo azul: onde as trajetórias de todas as participantes do grupo passam mais tempo (escala log). "
+                    p1.plotly_chart(painel(APa, MLa, idsA, gA, "#3a9d63", *lims_a), width="stretch")
+                    p2.plotly_chart(painel(APb, MLb, idsB, gB, "#d64541", *lims_b), width="stretch")
+                    st.caption(("Escala livre: cada gráfico se ajusta ao próprio grupo; compare formas, não tamanhos (veja os números dos eixos). "
+                                if modo_esc == "livre" else "Escala comum: os dois gráficos têm os mesmos eixos, então tamanhos são diretamente comparáveis. ")
+                               + "Fundo azul: onde as trajetórias de todas as participantes do grupo passam mais tempo (escala log). "
                                "Linha colorida: elipse de 95% média do grupo. Linha preta: a participante com valor mais próximo "
                                "da mediana do grupo.")
 
@@ -1429,15 +1459,16 @@ with abas[8]:
                     q1, q2 = st.columns(2)
                     D = Hb - Ha
                     lim = float(np.nanmax(np.abs(D)))
-                    fig = go.Figure(go.Heatmap(x=cent, y=cent, z=D, colorscale="RdBu_r", zmin=-lim, zmax=lim,
+                    fig = go.Figure(go.Heatmap(x=cm_c, y=ca_c, z=D, colorscale="RdBu_r", zmin=-lim, zmax=lim,
                                                colorbar=dict(title="Δ densidade")))
                     exa, eya = elipse(APa, MLa)
                     exb, eyb = elipse(APb, MLb)
                     fig.add_scatter(x=exa, y=eya, mode="lines", line=dict(color="#3a9d63", width=2), name=str(gA))
                     fig.add_scatter(x=exb, y=eyb, mode="lines", line=dict(color="#d64541", width=2, dash="dash"), name=str(gB))
                     fig.update_layout(height=480, legend=dict(orientation="h", y=-0.2), title=f"{gB} menos {gA}",
-                                      xaxis=dict(range=[-L, L], title="Médio-lateral (m/s²)"),
-                                      yaxis=dict(range=[-L, L], title="Antero-posterior (m/s²)", scaleanchor="x"))
+                                      xaxis=dict(range=[-Lml, Lml], title="Médio-lateral (m/s²)", constrain="domain"),
+                                      yaxis=dict(range=[-L, L], title="Antero-posterior (m/s²)", constrain="domain",
+                                                 **({"scaleanchor": "x"} if prop else {})))
                     q1.plotly_chart(fig, width="stretch")
                     q1.caption("Vermelho: regiões onde o grupo comparado passa **mais** tempo; azul: onde passa menos. "
                                "Vermelho nas bordas = oscilações mais amplas.")
@@ -1501,6 +1532,136 @@ with abas[8]:
                                                 str(gB): st.column_config.NumberColumn(format="%.4f"),
                                                 "Diferença (%)": st.column_config.NumberColumn(format="%+.0f"),
                                                 "p (Mann-Whitney)": st.column_config.NumberColumn(format="%.4f")})
+
+        # ---------- 5. várias categorias ao mesmo tempo
+        st.markdown("---")
+        st.markdown("#### 5. Comparar várias categorias ao mesmo tempo")
+        st.caption("Um estabilograma por categoria, todos na mesma escala e com a proporção real entre os eixos. "
+                   "Por padrão, as quatro macrorregiões.")
+        MULTI = {"macro_lbl": "Macrorregião", "reg": "Região de saúde", "mun": "Município", "faixa": "Faixa etária",
+                 "irq_g": "Classe do IRQ-Pará", "renda_g": "Renda familiar", "esc_g": "Escolaridade", "imc_g": "IMC",
+                 "ncom_g": "Nº de doenças crônicas"}
+        m1, m2 = st.columns(2)
+        dim_m = m1.selectbox("Categoria", list(MULTI), format_func=MULTI.get, key="est_multi_dim")
+        cond_m = m2.radio("Condição", ["oa", "of"], horizontal=True, key="est_multi_cond",
+                          format_func={"oa": "Olhos abertos", "of": "Olhos fechados"}.get)
+        sel_m = TR["cond"] == cond_m.upper()
+        idx_m = pd.Series(np.where(sel_m)[0], index=TR["ids"][sel_m])
+        idx_m = idx_m[~idx_m.index.duplicated()]
+        gm = de[dim_m].astype("object")
+        if dim_m in DIMS and hasattr(df_all[dim_m], "cat"):
+            ordem_m = [n for n in df_all[dim_m].cat.categories]
+        else:
+            ordem_m = sorted(gm.dropna().unique(), key=str)
+        grupos_m = []
+        for n in ordem_m:
+            ids = de.loc[gm == n, "id"]
+            ii = idx_m.reindex(ids).dropna().astype(int).values
+            if len(ii) >= 10:
+                grupos_m.append((str(n), ii, ids[idx_m.reindex(ids).notna().values].values))
+        if len(grupos_m) < 2:
+            st.info("Menos de duas categorias com 10 ou mais trajetórias no recorte.")
+        else:
+            if len(grupos_m) > 12:
+                st.caption(f"{len(grupos_m)} categorias: mostrando as 12 com mais participantes.")
+                grupos_m = sorted(grupos_m, key=lambda g_: -len(g_[1]))[:12]
+            PAL = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#7a3b8f", "#d64541", "#0d6b6e", "#8a6d3b",
+                   "#5b8def", "#c2410c", "#3a9d63", "#6250d6"]
+            if dim_m == "macro_lbl":
+                cores_g = {n: MACRO_COR.get(n, PAL[i]) for i, (n, _, _) in enumerate(grupos_m)}
+            else:
+                cores_g = {n: PAL[i % len(PAL)] for i, (n, _, _) in enumerate(grupos_m)}
+
+            def elipse_m(ii):
+                C = np.mean([np.cov(np.vstack([TR["ml"][j], TR["ap"][j]])) for j in ii], axis=0)
+                w, v = np.linalg.eigh(C)
+                t = np.linspace(0, 2 * np.pi, 120)
+                E = v @ np.diag(np.sqrt(5.991 * np.clip(w, 0, None))) @ np.vstack([np.cos(t), np.sin(t)])
+                return E[0], E[1]
+
+            todos = np.concatenate([ii for _, ii, _ in grupos_m])
+            Lm_ = max(float(np.nanpercentile(np.abs(TR["ap"][todos]), 99)), float(np.nanpercentile(np.abs(TR["ml"][todos]), 99)))
+            Lm_ = max([Lm_] + [float(np.max(np.abs(np.concatenate(elipse_m(ii))))) for _, ii, _ in grupos_m]) * 1.08
+            bins_m = np.linspace(-Lm_, Lm_, 41)
+            cent_m = (bins_m[:-1] + bins_m[1:]) / 2
+            ncol = 4 if len(grupos_m) >= 4 else len(grupos_m)
+            linhas = [grupos_m[i:i + ncol] for i in range(0, len(grupos_m), ncol)]
+            for lin_g in linhas:
+                cols_g = st.columns(ncol)
+                for cg, (nome, ii, ids) in zip(cols_g, lin_g):
+                    H = np.zeros((40, 40))
+                    for j in ii:
+                        h, _, _ = np.histogram2d(TR["ap"][j], TR["ml"][j], bins=[bins_m, bins_m])
+                        H += h / len(TR["ap"][j])
+                    H /= len(ii)
+                    fig = go.Figure(go.Heatmap(x=cent_m, y=cent_m, z=np.log10(H + 1e-5), colorscale="Blues",
+                                               showscale=False, hoverinfo="skip"))
+                    ex, ey = elipse_m(ii)
+                    fig.add_scatter(x=ex, y=ey, mode="lines", line=dict(color=cores_g[nome], width=3), showlegend=False)
+                    vals = de.set_index("id").loc[ids, f"r_area95_{cond_m}"]
+                    rid = (vals - vals.median()).abs().idxmin()
+                    j = int(idx_m[rid])
+                    fig.add_scatter(x=TR["ml"][j], y=TR["ap"][j], mode="lines", line=dict(color="#14201f", width=0.8),
+                                    opacity=0.7, showlegend=False)
+                    fig.update_layout(height=330, margin=dict(l=5, r=5, t=40, b=5),
+                                      title=dict(text=f"{nome} (n = {len(ii)})", font=dict(size=13)),
+                                      xaxis=dict(range=[-Lm_, Lm_], title="ML", constrain="domain"),
+                                      yaxis=dict(range=[-Lm_, Lm_], title="AP", scaleanchor="x", constrain="domain"))
+                    cg.plotly_chart(fig, width="stretch", key=f"est_multi_{dim_m}_{nome}")
+
+            s1, s2 = st.columns(2)
+            fig = go.Figure()
+            for nome, ii, _ in grupos_m:
+                ex, ey = elipse_m(ii)
+                fig.add_scatter(x=ex, y=ey, mode="lines", name=nome, line=dict(color=cores_g[nome], width=3))
+            fig.update_layout(height=470, title="Elipses de 95% sobrepostas", legend=dict(orientation="h", y=-0.2),
+                              xaxis=dict(title="Médio-lateral (m/s²)", constrain="domain"),
+                              yaxis=dict(title="Antero-posterior (m/s²)", scaleanchor="x", constrain="domain"))
+            s1.plotly_chart(fig, width="stretch")
+
+            setores_m = np.arange(0, 360, 15)
+            fig = go.Figure()
+            for nome, ii, _ in grupos_m:
+                AP_, ML_ = TR["ap"][ii], TR["ml"][ii]
+                ang = (np.degrees(np.arctan2(AP_, ML_)) + 360) % 360
+                r = np.sqrt(AP_ ** 2 + ML_ ** 2)
+                prof = []
+                for s_ in setores_m:
+                    msk = (ang >= s_) & (ang < s_ + 15)
+                    prof.append(np.nanmedian([np.nanpercentile(r[i][msk[i]], 95) if msk[i].sum() > 3 else np.nan
+                                              for i in range(len(r))]))
+                fig.add_scatterpolar(r=prof + [prof[0]], theta=list(setores_m + 7.5) + [7.5], name=nome,
+                                     line=dict(color=cores_g[nome], width=2.5))
+            fig.update_layout(height=470, title="Alcance da oscilação por direção", legend=dict(orientation="h", y=-0.2),
+                              polar=dict(angularaxis=dict(rotation=0, direction="counterclockwise",
+                                                          tickvals=[0, 90, 180, 270],
+                                                          ticktext=["Lateral", "Frente", "Lateral", "Trás"])))
+            s2.plotly_chart(fig, width="stretch")
+
+            from scipy import stats as _st2
+            med_cols = list(MEDIDAS_EST)
+            tab = []
+            for nome, ii, ids in grupos_m:
+                sub = de.set_index("id").loc[ids]
+                row = {"Categoria": nome, "n": str(len(ii))}
+                for mk_ in med_cols:
+                    row[MEDIDAS_EST[mk_][0]] = sub[f"r_{mk_}_{cond_m}"].median()
+                tab.append(row)
+            T = pd.DataFrame(tab)
+            pvals = {}
+            for mk_ in med_cols:
+                amostras = [de.set_index("id").loc[ids, f"r_{mk_}_{cond_m}"].dropna() for _, _, ids in grupos_m]
+                amostras = [a_ for a_ in amostras if len(a_) >= 5]
+                pvals[MEDIDAS_EST[mk_][0]] = _st2.kruskal(*amostras).pvalue if len(amostras) >= 2 else np.nan
+            T = pd.concat([T, pd.DataFrame([{"Categoria": "p (Kruskal-Wallis)", "n": "", **pvals}])], ignore_index=True)
+            st.dataframe(T, hide_index=True, width="stretch",
+                         column_config={MEDIDAS_EST[m][0]: st.column_config.NumberColumn(format="%.4f") for m in med_cols})
+            ref = T.iloc[:-1].set_index("Categoria")["Área da elipse 95%"]
+            st.caption(f"Medianas por categoria. A área da elipse vai de {ref.min():.4f} ({ref.idxmin()}) a "
+                       f"{ref.max():.4f} ({ref.idxmax()}), {(ref.max() / ref.min() - 1) * 100:.0f}% a mais. "
+                       "A última linha testa se as categorias diferem entre si (p < 0,05 = diferença significativa). "
+                       "Lembre que a idade média muda entre regiões; para separar o efeito do território, filtre uma "
+                       "faixa etária na barra lateral.")
 
 # ================================================================ CRUZAMENTOS
 with abas[9]:
