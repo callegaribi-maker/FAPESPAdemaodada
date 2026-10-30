@@ -337,7 +337,7 @@ if df.empty:
     st.stop()
 
 abas = st.tabs(["Panorama", "Índice de risco", "Municípios", "Ciclo de vida", "Fatores de risco", "Perfil de risco",
-                "Equilíbrio postural", "Sensor do celular", "Cruzamentos", "Método"])
+                "Equilíbrio postural", "Sensor do celular", "Estabilogramas", "Cruzamentos", "Método"])
 
 # ================================================================ PANORAMA
 with abas[0]:
@@ -1253,8 +1253,257 @@ na literatura de envelhecimento. É uma das medidas mais repetíveis (ICC ≈ 0,
 - **Para ganhar poder individual:** padronizar a duração (60 s) e a orientação do aparelho em todos os municípios; tarefas mais desafiadoras (pés juntos, tandem, apoio unipodal, dupla tarefa); padronizar piso, posição e aparelho; registrar IMC para corrigir o amortecimento; e acompanhar as participantes prospectivamente (quedas nos 12 meses **seguintes**), que é o teste definitivo de predição.
 """)
 
-# ================================================================ CRUZAMENTOS
+# ================================================================ ESTABILOGRAMAS
+@st.cache_data
+def carregar_trajetorias():
+    """Trajetórias AP × ML (aceleração, 10 Hz, 50 s) extraídas dos sinais brutos; chave = ID do formulário."""
+    try:
+        z = np.load("trajetorias_estabilograma.npz")
+    except Exception:
+        return None
+    ids, cond = z["ids"].astype(str), z["cond"].astype(str)
+    ap = z["ap"].astype(np.float32) / 1e4
+    ml = z["ml"].astype(np.float32) / 1e4
+    return {"ids": ids, "cond": cond, "ap": ap, "ml": ml}
+
+
+MEDIDAS_EST = {"area95": ("Área da elipse 95%", 1), "rms_ap": ("RMS antero-posterior", 1), "rms_ml": ("RMS médio-lateral", 1),
+               "path_vel": ("Velocidade média", 1), "jerk_ap": ("Jerk AP", 1), "sampen_ap": ("Entropia amostral AP", -1)}
+COMPARACOES = {"queda": "Queda (12 meses)", "recorrente": "Quedas recorrentes", "lesao": "Queda com lesão",
+               "dequil": "Dificuldade de equilíbrio", "vertigem": "Vertigem", "diabetes": "Diabetes", "hipert": "Hipertensão",
+               "dvis": "Doença visual", "osteoart": "Doença osteoarticular", "multimed": "≥ 2 medicamentos",
+               "obst": "Obstáculos em casa", "ativ": "Atividade física", "alcool": "Álcool",
+               "idoso": "Idade ≥ 60", "irq_alto": "IRQ alto/muito alto", "pant31": "Panturrilha < 31 cm", "obes": "Obesidade",
+               "faixa": "Faixa etária (extremos)", "macro_lbl": "Macrorregião (extremos)", "irq_g": "Classe do IRQ (extremos)",
+               "renda_g": "Renda (extremos)", "esc_g": "Escolaridade (extremos)", "imc_g": "IMC (extremos)",
+               "ncom_g": "Nº de doenças (extremos)", "mun": "Município (extremos)"}
+
+
+def grupos_de(d, chave):
+    """Devolve uma Series com o rótulo de grupo de cada participante."""
+    if chave in d.columns and chave in BINLBL or chave in ("multimed", "idoso", "irq_alto", "pant31", "obes"):
+        return d[chave].map({1: "Sim", 0: "Não", 1.0: "Sim", 0.0: "Não"})
+    return d[chave].astype("object")
+
+
 with abas[8]:
+    st.subheader("Estabilogramas: onde as diferenças de oscilação são maiores")
+    st.caption("Estabilograma = trajetória do tronco no plano horizontal, medida pelo celular na lombar (aceleração "
+               "antero-posterior × médio-lateral, 50 s, filtrada 0,1–4 Hz). Todas as trajetórias vêm dos sinais brutos "
+               "reprocessados. Os filtros da barra lateral valem para esta aba.")
+    TR = carregar_trajetorias()
+    if TR is None:
+        st.warning("Envie o arquivo **trajetorias_estabilograma.npz** para o repositório para ver esta aba.")
+    else:
+        de = df.copy()
+        de["idoso"] = (de.idade >= 60).astype(float).where(de.idade.notna())
+        de["multimed"] = (de.nmed >= 2).astype(float).where(de.nmed.notna())
+        de["pant31"] = (de.panturrilha < 31).astype(float).where(de.panturrilha.notna())
+        de["obes"] = (de.imc >= 30).astype(float).where(de.imc.notna())
+        c1, c2 = st.columns(2)
+        cond = c1.radio("Condição", ["oa", "of"], horizontal=True, key="est_cond",
+                        format_func={"oa": "Olhos abertos", "of": "Olhos fechados"}.get)
+        med = c2.selectbox("Medida para comparar", list(MEDIDAS_EST), format_func=lambda k: MEDIDAS_EST[k][0], key="est_med")
+        col = f"r_{med}_{cond}"
+
+        # ---------- 1. ranking das diferenças
+        st.markdown("#### 1. Ranking: em quais comparações a oscilação muda mais")
+        from scipy import stats as _st
+        lin = []
+        for k_, nome in COMPARACOES.items():
+            if k_ not in de.columns:
+                continue
+            g = grupos_de(de, k_)
+            x = pd.DataFrame({"g": g, "v": de[col]}).dropna()
+            cont = x.groupby("g").v.agg(["median", "size"])
+            cont = cont[cont["size"] >= 20]
+            if len(cont) < 2:
+                continue
+            if set(cont.index) == {"Sim", "Não"}:
+                hi, lo = "Sim", "Não"
+            else:
+                hi, lo = cont["median"].idxmax(), cont["median"].idxmin()
+            mh, ml_ = cont.loc[hi, "median"], cont.loc[lo, "median"]
+            p = _st.mannwhitneyu(x.v[x.g == hi], x.v[x.g == lo]).pvalue
+            lin.append(dict(Comparação=nome, chave=k_, A=str(lo), B=str(hi), dif=(mh / ml_ - 1) * 100, p=p,
+                            nA=int(cont.loc[lo, "size"]), nB=int(cont.loc[hi, "size"])))
+        RK = pd.DataFrame(lin)
+        if RK.empty:
+            st.info("Poucas participantes no recorte para comparar.")
+        else:
+            RK["rotulo"] = RK.apply(lambda r: f"{r.Comparação}: {r.B} vs {r.A}" if r.B != "Sim" else r.Comparação, axis=1)
+            RK["sig"] = np.where(RK.p < 0.05, "p < 0,05", "não significativo")
+            RK = RK.sort_values("dif", key=lambda s: s.abs())
+            fig = px.bar(RK, x="dif", y="rotulo", color="sig", orientation="h",
+                         color_discrete_map={"p < 0,05": "#d64541", "não significativo": "#b8c2bf"},
+                         hover_data={"p": ":.4f", "nA": True, "nB": True, "rotulo": False},
+                         labels={"dif": f"Diferença na mediana de {MEDIDAS_EST[med][0]} (%)", "rotulo": "", "sig": ""})
+            fig.add_vline(x=0, line_color="#4c5856")
+            fig.update_layout(height=max(420, 26 * len(RK)), legend_orientation="h")
+            st.plotly_chart(fig, width="stretch")
+            st.caption("Para Sim/Não: quanto a mediana é maior em quem tem o fator. Para variáveis com várias categorias: "
+                       "diferença entre o grupo de maior e o de menor mediana (grupos com ≥ 20 participantes). "
+                       + ("A entropia amostral é menor (pior) em grupos de risco: barras negativas indicam balanço mais rígido."
+                          if med == "sampen_ap" else ""))
+
+            # ---------- 2. estabilogramas lado a lado
+            st.markdown("#### 2. Estabilogramas dos grupos")
+            top = RK.sort_values("dif", key=lambda s: -s.abs()).iloc[0]
+            opcoes = RK.sort_values("dif", key=lambda s: -s.abs()).chave.tolist()
+            k1, k2, k3 = st.columns(3)
+            comp = k1.selectbox("Comparação", opcoes, format_func=COMPARACOES.get, key="est_comp")
+            g = grupos_de(de, comp)
+            niveis = [n for n in pd.Series(g).dropna().value_counts().index if (g == n).sum() >= 10]
+            ordem_niv = sorted(niveis, key=lambda n: de.loc[g == n, col].median() if de.loc[g == n, col].notna().any() else 0)
+            if len(ordem_niv) < 2:
+                st.info("Esta comparação tem menos de dois grupos com dados no recorte.")
+            else:
+                gA = k2.selectbox("Grupo de referência", ordem_niv, index=0, key="est_ga")
+                gB = k3.selectbox("Grupo comparado", ordem_niv, index=len(ordem_niv) - 1, key="est_gb")
+                cmap = {cc.upper(): cc for cc in ["oa", "of"]}
+                sel_c = TR["cond"] == cond.upper()
+                idx = pd.Series(np.where(sel_c)[0], index=TR["ids"][sel_c])
+                idx = idx[~idx.index.duplicated()]
+
+                def pegar(grupo):
+                    ids = de.loc[g == grupo, "id"]
+                    ii = idx.reindex(ids).dropna().astype(int).values
+                    return TR["ap"][ii], TR["ml"][ii], ids[idx.reindex(ids).notna().values].values
+
+                APa, MLa, idsA = pegar(gA)
+                APb, MLb, idsB = pegar(gB)
+                if len(APa) < 5 or len(APb) < 5:
+                    st.info("Poucas trajetórias em um dos grupos.")
+                else:
+                    L = float(np.nanpercentile(np.abs(np.concatenate([APa.ravel(), APb.ravel()])), 98))
+                    Lm = float(np.nanpercentile(np.abs(np.concatenate([MLa.ravel(), MLb.ravel()])), 98))
+                    L = max(L, Lm)
+                    bins = np.linspace(-L, L, 41)
+
+                    def dens(AP, ML):
+                        H = np.zeros((40, 40))
+                        for a_, m_ in zip(AP, ML):
+                            h, _, _ = np.histogram2d(a_, m_, bins=[bins, bins])
+                            H += h / max(h.sum(), 1)
+                        return H / len(AP)
+
+                    Ha, Hb = dens(APa, MLa), dens(APb, MLb)
+                    cent = (bins[:-1] + bins[1:]) / 2
+
+                    def elipse(AP, ML):
+                        C = np.mean([np.cov(np.vstack([m_, a_])) for a_, m_ in zip(AP, ML)], axis=0)
+                        w, v = np.linalg.eigh(C)
+                        t = np.linspace(0, 2 * np.pi, 120)
+                        E = (v @ np.diag(np.sqrt(5.991 * w)) @ np.vstack([np.cos(t), np.sin(t)]))
+                        return E[0], E[1]
+
+                    def representante(grupo, ids):
+                        v = de.set_index("id").loc[ids, col]
+                        alvo = v.median()
+                        return (v - alvo).abs().idxmin()
+
+                    def painel(H, AP, ML, ids, grupo, cor):
+                        fig = go.Figure(go.Heatmap(x=cent, y=cent, z=np.log10(H + 1e-5), colorscale="Blues", showscale=False,
+                                                   hoverinfo="skip"))
+                        ex, ey = elipse(AP, ML)
+                        fig.add_scatter(x=ex, y=ey, mode="lines", line=dict(color=cor, width=3), name="Elipse 95% do grupo")
+                        rid = representante(grupo, ids)
+                        j = int(idx[rid])
+                        fig.add_scatter(x=TR["ml"][j], y=TR["ap"][j], mode="lines", line=dict(color="#14201f", width=1),
+                                        opacity=0.75, name="Participante típica")
+                        fig.update_layout(height=470, margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h", y=-0.22),
+                                          title=f"{grupo} (n = {len(AP)})",
+                                          xaxis=dict(range=[-L, L], title="Médio-lateral (m/s²)", zeroline=True),
+                                          yaxis=dict(range=[-L, L], title="Antero-posterior (m/s²)", scaleanchor="x"))
+                        return fig
+
+                    p1, p2 = st.columns(2)
+                    p1.plotly_chart(painel(Ha, APa, MLa, idsA, gA, "#3a9d63"), width="stretch")
+                    p2.plotly_chart(painel(Hb, APb, MLb, idsB, gB, "#d64541"), width="stretch")
+                    st.caption("Fundo azul: onde as trajetórias de todas as participantes do grupo passam mais tempo (escala log). "
+                               "Linha colorida: elipse de 95% média do grupo. Linha preta: a participante com valor mais próximo "
+                               "da mediana do grupo.")
+
+                    # ---------- 3. mapa de diferença + perfil direcional
+                    st.markdown("#### 3. Onde está a diferença")
+                    q1, q2 = st.columns(2)
+                    D = Hb - Ha
+                    lim = float(np.nanmax(np.abs(D)))
+                    fig = go.Figure(go.Heatmap(x=cent, y=cent, z=D, colorscale="RdBu_r", zmin=-lim, zmax=lim,
+                                               colorbar=dict(title="Δ densidade")))
+                    exa, eya = elipse(APa, MLa)
+                    exb, eyb = elipse(APb, MLb)
+                    fig.add_scatter(x=exa, y=eya, mode="lines", line=dict(color="#3a9d63", width=2), name=str(gA))
+                    fig.add_scatter(x=exb, y=eyb, mode="lines", line=dict(color="#d64541", width=2, dash="dash"), name=str(gB))
+                    fig.update_layout(height=480, legend=dict(orientation="h", y=-0.2), title=f"{gB} menos {gA}",
+                                      xaxis=dict(range=[-L, L], title="Médio-lateral (m/s²)"),
+                                      yaxis=dict(range=[-L, L], title="Antero-posterior (m/s²)", scaleanchor="x"))
+                    q1.plotly_chart(fig, width="stretch")
+                    q1.caption("Vermelho: regiões onde o grupo comparado passa **mais** tempo; azul: onde passa menos. "
+                               "Vermelho nas bordas = oscilações mais amplas.")
+
+                    setores = np.arange(0, 360, 15)
+
+                    def perfil(AP, ML):
+                        ang = (np.degrees(np.arctan2(AP, ML)) + 360) % 360
+                        r = np.sqrt(AP ** 2 + ML ** 2)
+                        out = []
+                        for s in setores:
+                            m_ = (ang >= s) & (ang < s + 15)
+                            out.append(np.nanmedian([np.nanpercentile(r[i][m_[i]], 95) if m_[i].sum() > 3 else np.nan
+                                                     for i in range(len(r))]))
+                        return np.array(out)
+
+                    pa_, pb_ = perfil(APa, MLa), perfil(APb, MLb)
+                    th = list(setores + 7.5) + [setores[0] + 7.5]
+                    fig = go.Figure()
+                    fig.add_scatterpolar(r=list(pa_) + [pa_[0]], theta=th, name=str(gA), line=dict(color="#3a9d63", width=3))
+                    fig.add_scatterpolar(r=list(pb_) + [pb_[0]], theta=th, name=str(gB), line=dict(color="#d64541", width=3),
+                                         fill="tonext", fillcolor="rgba(214,69,65,0.12)")
+                    fig.update_layout(height=460, legend_orientation="h", title="Alcance da oscilação por direção",
+                                      polar=dict(angularaxis=dict(rotation=0, direction="counterclockwise",
+                                                                  tickvals=[0, 90, 180, 270],
+                                                                  ticktext=["Direita", "Frente", "Esquerda", "Trás"])))
+                    q2.plotly_chart(fig, width="stretch")
+                    ap_ratio = np.nanmean(pb_[[5, 6, 17, 18]]) / np.nanmean(pa_[[5, 6, 17, 18]])
+                    ml_ratio = np.nanmean(pb_[[0, 11, 12, 23]]) / np.nanmean(pa_[[0, 11, 12, 23]])
+                    q2.caption(f"Raio = percentil 95 da distância ao centro em cada direção (mediana do grupo). "
+                               f"No eixo frente-trás o grupo comparado oscila **{(ap_ratio - 1) * 100:+.0f}%**; "
+                               f"no eixo lateral, **{(ml_ratio - 1) * 100:+.0f}%**. "
+                               "A orientação direita/esquerda depende do lado da tela do celular e deve ser lida como 'lateral'.")
+
+                    # ---------- 4. estabilograma no tempo
+                    st.markdown("#### 4. Estabilograma no tempo (participantes típicas)")
+                    t = np.arange(500) / 10
+                    fig = go.Figure()
+                    for grupo, ids, cor in [(gA, idsA, "#3a9d63"), (gB, idsB, "#d64541")]:
+                        j = int(idx[representante(grupo, ids)])
+                        fig.add_scatter(x=t, y=TR["ap"][j], mode="lines", line=dict(color=cor, width=1.4),
+                                        name=f"{grupo}: antero-posterior")
+                        fig.add_scatter(x=t, y=TR["ml"][j] - 2.2 * L / 2, mode="lines", line=dict(color=cor, width=1.4, dash="dot"),
+                                        name=f"{grupo}: médio-lateral (deslocado)")
+                    fig.update_layout(height=440, legend=dict(orientation="h", y=-0.25), xaxis_title="Tempo (s)",
+                                      yaxis_title="Aceleração (m/s²)")
+                    st.plotly_chart(fig, width="stretch")
+                    st.caption("Linhas cheias: frente-trás; pontilhadas: lateral (desenhadas abaixo para não sobrepor).")
+
+                    # ---------- resumo numérico
+                    t2 = pd.DataFrame({
+                        "Medida": [MEDIDAS_EST[m][0] for m in MEDIDAS_EST],
+                        str(gA): [de.loc[g == gA, f"r_{m}_{cond}"].median() for m in MEDIDAS_EST],
+                        str(gB): [de.loc[g == gB, f"r_{m}_{cond}"].median() for m in MEDIDAS_EST]})
+                    t2["Diferença (%)"] = (t2[str(gB)] / t2[str(gA)] - 1) * 100
+                    t2["p (Mann-Whitney)"] = [_st.mannwhitneyu(de.loc[g == gB, f"r_{m}_{cond}"].dropna(),
+                                                               de.loc[g == gA, f"r_{m}_{cond}"].dropna()).pvalue
+                                              for m in MEDIDAS_EST]
+                    st.dataframe(t2, hide_index=True, width="stretch",
+                                 column_config={str(gA): st.column_config.NumberColumn(format="%.4f"),
+                                                str(gB): st.column_config.NumberColumn(format="%.4f"),
+                                                "Diferença (%)": st.column_config.NumberColumn(format="%+.0f"),
+                                                "p (Mann-Whitney)": st.column_config.NumberColumn(format="%.4f")})
+
+# ================================================================ CRUZAMENTOS
+with abas[9]:
     st.subheader("Tabela de cruzamentos")
     st.caption("Combine quaisquer duas dimensões e um indicador. Células com menos de 10 participantes ficam em branco.")
     c1, c2, c3 = st.columns(3)
@@ -1287,7 +1536,7 @@ with abas[8]:
     st.download_button("Baixar tabela (CSV)", val.to_csv().encode("utf-8-sig"), "cruzamento.csv", "text/csv")
 
 # ================================================================ MÉTODO
-with abas[9]:
+with abas[10]:
     st.subheader("Como os dados foram tratados")
     mac = df_all.drop_duplicates("mun").groupby("macro_lbl").apply(
         lambda g: f"**{g.name}** ({', '.join(sorted(g.reg.unique()))}): {', '.join(sorted(g.mun))}")
