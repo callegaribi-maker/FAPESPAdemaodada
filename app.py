@@ -751,6 +751,195 @@ with abas[4]:
         st.plotly_chart(forest(m["rows"], "OR ajustada (escala log)"), width="stretch")
         st.caption(f"{m['n']} participantes com dados completos, {m['ev']} com queda. Pseudo-R² {m['r2']*100:.1f}%.")
 
+    # ---------------------------------------------------------------- por macrorregião
+    st.markdown("---")
+    st.subheader("O risco é igual em todas as macrorregiões?")
+    st.caption("Mesmas análises, feitas separadamente em cada macrorregião. Os demais filtros da barra lateral continuam "
+               "valendo; o filtro de macrorregião é ignorado aqui para que as quatro apareçam lado a lado.")
+    dmac = filtrar(df_all, ignorar=("macro",))
+    MAC = [f"Macro {m}" for m in MACROS]
+    outc_m = {"queda": "Queda (12 meses)", "lesao": "Queda com lesão", "recorrente": "Quedas recorrentes"}
+    om = st.selectbox("Desfecho", list(outc_m), format_func=outc_m.get, key="mac_out")
+
+    # 1. prevalência do desfecho por macro
+    cols_k = st.columns(4)
+    for cc, mlab in zip(cols_k, MAC):
+        sub = dmac[dmac.macro_lbl == mlab]
+        cc.metric(mlab, fmt(om, sub[om].mean()), f"n = {sub[om].notna().sum()}", delta_color="off")
+
+    # 2. mapa de calor RP fator × macro + teste de heterogeneidade
+    @st.cache_data(show_spinner=False)
+    def heterogeneidade(dados, fator, desfecho):
+        x = dados[[fator, desfecho, "macro_lbl"]].dropna().rename(columns={fator: "f", desfecho: "y"})
+        if x.f.nunique() < 2 or x.y.nunique() < 2:
+            return np.nan
+        try:
+            # sem fórmulas (o app tem variáveis globais chamadas C que confundem o patsy)
+            dm = pd.get_dummies(x.macro_lbl, prefix="m", drop_first=True, dtype=float)
+            X1 = pd.concat([x[["f"]].astype(float), dm], axis=1)
+            inter = dm.mul(x.f.astype(float), axis=0).add_prefix("fx_")
+            X2 = pd.concat([X1, inter], axis=1)
+            m1 = sm.Logit(x.y.astype(float), sm.add_constant(X1)).fit(disp=0, maxiter=200)
+            m2 = sm.Logit(x.y.astype(float), sm.add_constant(X2)).fit(disp=0, maxiter=200)
+            from scipy.stats import chi2 as _chi2
+            return float(_chi2.sf(2 * (m2.llf - m1.llf), X2.shape[1] - X1.shape[1]))
+        except Exception:
+            return np.nan
+
+    lin = []
+    for k, nome in EXPOS.items():
+        if k == om or k not in dmac.columns:
+            continue
+        geral = rp(dmac, k, om)
+        if not geral or geral["a"] < 10:
+            continue
+        row = {"Fator": nome, "chave": k, "Todas": geral["rp"], "Todas_sig": geral["lo"] > 1 or geral["hi"] < 1}
+        for mlab in MAC:
+            r = rp(dmac[dmac.macro_lbl == mlab], k, om)
+            ok_ = r is not None and r["a"] >= 5 and r["c"] >= 5
+            row[mlab] = r["rp"] if ok_ else np.nan
+            row[mlab + "_sig"] = ok_ and (r["lo"] > 1 or r["hi"] < 1)
+            row[mlab + "_prev"] = (r["n1"] / (r["n1"] + r["n0"])) if r else np.nan
+            row[mlab + "_txt"] = (f"{r['p1']*100:.0f}% vs {r['p0']*100:.0f}% (com/sem; {r['a']}/{r['n1']} expostas)"
+                                  if r else "")
+        row["p_het"] = heterogeneidade(dmac, k, om)
+        lin.append(row)
+    HM = pd.DataFrame(lin)
+    if HM.empty:
+        st.info("Poucos casos no recorte para comparar as macrorregiões.")
+    else:
+        HM = HM.sort_values("Todas", ascending=False)
+        colsZ = ["Todas"] + MAC
+        Z = np.log(HM[colsZ].astype(float).values)
+        txt = []
+        for _, r in HM.iterrows():
+            linha = []
+            for c in colsZ:
+                v = r[c]
+                linha.append("–" if pd.isna(v) else f"{v:.1f}".replace(".", ",") + (" *" if r[c + "_sig"] else ""))
+            txt.append(linha)
+        hov = [[f"{r['Fator']} · {c}<br>RP {('–' if pd.isna(r[c]) else f'{r[c]:.2f}')}"
+                + (f"<br>{r[c + '_txt']}" if c != "Todas" else "") for c in colsZ] for _, r in HM.iterrows()]
+        het_lab = [f"{f}  {'⚠️' if (p == p and p < 0.05) else ''}" for f, p in zip(HM.Fator, HM.p_het)]
+        fig = go.Figure(go.Heatmap(z=Z, x=["Todas as macros"] + MAC, y=het_lab, text=txt, texttemplate="%{text}",
+                                   hovertext=hov, hoverinfo="text", colorscale="RdBu_r", zmid=0, zmin=-1.2, zmax=1.2,
+                                   colorbar=dict(title="RP", tickvals=np.log([0.33, 0.5, 1, 2, 3]),
+                                                 ticktext=["0,33", "0,5", "1", "2", "3"])))
+        fig.update_layout(height=max(420, 24 * len(HM) + 120), yaxis_autorange="reversed",
+                          margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig, width="stretch")
+        nhet = HM[HM.p_het < 0.05]
+        st.caption("Cada célula: razão de prevalência (quantas vezes o desfecho é mais frequente em quem tem o fator) "
+                   "dentro da macrorregião. Vermelho = aumenta o risco; azul = reduz; * = IC 95% não inclui 1; "
+                   "– = menos de 5 casos. ⚠️ = o efeito do fator **difere entre as macrorregiões** "
+                   "(teste de interação fator × macrorregião, p < 0,05).")
+        if len(nhet):
+            st.warning("**O risco não é igual em todas as macrorregiões para:** "
+                       + "; ".join(f"{r.Fator} (p = {r.p_het:.3f})" for r in nhet.itertuples())
+                       + ". Para os demais fatores, as diferenças entre macrorregiões são compatíveis com o acaso.")
+        else:
+            st.success("Nenhum fator teve efeito estatisticamente diferente entre as macrorregiões: as variações vistas "
+                       "nas células são compatíveis com o acaso (amostras menores em cada macro).")
+
+        # 3. detalhe de um fator
+        st.markdown("**Detalhe de um fator**")
+        fsel = st.selectbox("Fator", HM.chave.tolist(), format_func=lambda k: EXPOS.get(k, k), key="mac_fator")
+        rows_f = []
+        for mlab in ["Todas"] + MAC:
+            sub = dmac if mlab == "Todas" else dmac[dmac.macro_lbl == mlab]
+            r = rp(sub, fsel, om)
+            if r and r["a"] >= 3 and r["c"] >= 3:
+                rows_f.append(dict(nome=("Todas as macros" if mlab == "Todas" else mlab), v=r["rp"], lo=r["lo"],
+                                   hi=r["hi"], hover=f"{mlab}<br>{r['p1']*100:.1f}% com ({r['a']}/{r['n1']}) vs "
+                                                     f"{r['p0']*100:.1f}% sem ({r['c']}/{r['n0']})<br>RP {r['rp']:.2f} "
+                                                     f"(IC {r['lo']:.2f}–{r['hi']:.2f})"))
+        d1, d2 = st.columns(2)
+        if rows_f:
+            figf = forest(rows_f[::-1], "Razão de prevalência (escala log)")
+            figf.update_layout(height=320)
+            d1.plotly_chart(figf, width="stretch")
+        t = []
+        for mlab in MAC:
+            sub = dmac[dmac.macro_lbl == mlab]
+            for v, lab_ in [(1, "Com o fator"), (0, "Sem o fator")]:
+                s2 = sub[sub[fsel] == v][om]
+                t.append(dict(macro=mlab, grupo=lab_, pct=s2.mean() * 100, n=s2.notna().sum()))
+        t = pd.DataFrame(t)
+        figb = px.bar(t, x="macro", y="pct", color="grupo", barmode="group", hover_data=["n"],
+                      text=t.pct.round(0).astype("Int64").astype(str) + "%",
+                      color_discrete_map={"Com o fator": "#d64541", "Sem o fator": "#3a9d63"},
+                      labels={"pct": f"{outc_m[om]} (%)", "macro": "", "grupo": ""})
+        figb.update_layout(height=320, legend_orientation="h")
+        d2.plotly_chart(figb, width="stretch")
+
+        # 4. quanto cada fator pesa em cada macro (fração atribuível)
+        st.markdown("**Onde cada fator pesa mais: prevalência × força do efeito**")
+        st.caption("Fração atribuível = parte dos casos que seria evitada se o fator fosse eliminado naquela macrorregião "
+                   "(combina quão comum é o fator e quanto ele aumenta o risco). Considera só associações brutas.")
+        fa = []
+        for _, r in HM.iterrows():
+            for mlab in MAC:
+                pe, rr = r[mlab + "_prev"], r[mlab]
+                if pd.notna(pe) and pd.notna(rr) and rr > 1:
+                    fa.append(dict(Fator=r.Fator, macro=mlab, paf=pe * (rr - 1) / (1 + pe * (rr - 1)) * 100,
+                                   prev=pe * 100))
+        FA = pd.DataFrame(fa)
+        if not FA.empty:
+            top_f = FA.groupby("Fator").paf.max().sort_values(ascending=False).head(12).index.tolist()
+            FA = FA[FA.Fator.isin(top_f)]
+            figp = px.bar(FA, x="paf", y="Fator", color="macro", barmode="group", orientation="h",
+                          color_discrete_map=MACRO_COR, hover_data={"prev": ":.0f"},
+                          category_orders={"Fator": top_f, "macro": MAC},
+                          labels={"paf": "Fração atribuível (%)", "Fator": "", "macro": "", "prev": "Prevalência do fator (%)"})
+            figp.update_layout(height=max(380, 34 * len(top_f) + 100), legend_orientation="h")
+            st.plotly_chart(figp, width="stretch")
+
+    # 5. modelo ajustado por macro
+    st.markdown("**Modelo ajustado em cada macrorregião** (amostra completa, sem filtros)")
+
+    @st.cache_data(show_spinner=False)
+    def modelos_macro():
+        d = df_all.copy()
+        d["idade10"] = d.idade / 10
+        lab = {"idade10": "Idade (+10 anos)", "diabetes": "Diabetes", "dequil": "Dificuldade de equilíbrio",
+               "obst": "Obstáculos em casa", "vertigem": "Vertigem recente", "multimed": "Uso de ≥2 medicamentos",
+               "dvis": "Doença visual", "hipert": "Hipertensão", "osteoart": "Doença osteoarticular",
+               "esc": "Escolaridade (+1 nível)"}
+        X = list(lab)
+        out = []
+        for mlab in ["Todas"] + [f"Macro {m}" for m in MACROS]:
+            sub = d if mlab == "Todas" else d[d.macro_lbl == mlab]
+            dd = sub[["queda"] + X].dropna()
+            try:
+                m = sm.Logit(dd.queda, sm.add_constant(dd[X])).fit(disp=0, maxiter=200)
+                ci = m.conf_int()
+                for v in X:
+                    out.append(dict(macro=mlab, Fator=lab[v], OR=float(np.exp(m.params[v])), lo=float(np.exp(ci.loc[v, 0])),
+                                    hi=float(np.exp(ci.loc[v, 1])), p=float(m.pvalues[v]), n=len(dd), ev=int(dd.queda.sum())))
+            except Exception:
+                pass
+        return pd.DataFrame(out)
+
+    MM = modelos_macro()
+    if not MM.empty:
+        MM["txt"] = MM.apply(lambda r: f"{r.OR:.2f}".replace(".", ",") + (" *" if r.p < 0.05 else ""), axis=1)
+        piv = MM.pivot(index="Fator", columns="macro", values="OR")[["Todas"] + MAC]
+        pivt = MM.pivot(index="Fator", columns="macro", values="txt")[["Todas"] + MAC]
+        ordem_f = piv["Todas"].sort_values(ascending=False).index
+        piv, pivt = piv.loc[ordem_f], pivt.loc[ordem_f]
+        figm = go.Figure(go.Heatmap(z=np.log(piv.clip(0.1, 10).values), x=["Todas as macros"] + MAC, y=piv.index,
+                                    text=pivt.values, texttemplate="%{text}", colorscale="RdBu_r", zmid=0, zmin=-1.5, zmax=1.5,
+                                    colorbar=dict(title="OR", tickvals=np.log([0.25, 0.5, 1, 2, 4]),
+                                                  ticktext=["0,25", "0,5", "1", "2", "4"])))
+        figm.update_layout(height=420, yaxis_autorange="reversed", margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(figm, width="stretch")
+        nn = MM.drop_duplicates("macro").set_index("macro")
+        st.caption("Razão de chances ajustada por todos os fatores da tabela, dentro de cada macrorregião. * = p < 0,05. "
+                   "Participantes / quedas: " + " · ".join(f"{k}: {int(r.n)}/{int(r.ev)}" for k, r in nn.iterrows())
+                   + ". Com 30–80 quedas por macrorregião, intervalos são largos: um OR alto sem * pode ser só falta "
+                     "de poder estatístico.")
+
+    st.markdown("---")
     st.subheader("Carga de comorbidades")
     ks = ["hipert", "diabetes", "dvis", "refrativo", "catarata", "glaucoma", "osteoart", "respir", "depans", "dneu",
           "cardio", "tireoide", "fibro", "avc", "malaria"]
