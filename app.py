@@ -140,7 +140,62 @@ def carregar():
     d["irq_alto"] = d.irq_g.isin(["Alto", "Muito alto"]).astype(float)
     for k in BINLBL:
         d["b_" + k] = d[k].map({1: "Sim", 0: "Não"})
+    d["peso"] = pesos_censo(d)
     return d
+
+
+FAIXAS = ["18–29", "30–39", "40–49", "50–59", "60–69", "70+"]
+
+
+def pesos_censo(d):
+    """Pós-estratificação município × faixa etária pela população feminina do Censo 2022 (IBGE, tabela 9514).
+
+    peso = mulheres na população da célula / participantes na célula. Células sem participantes têm sua
+    população somada à faixa vizinha mais próxima do mesmo município. Sem idade: peso médio do município.
+    Pesos normalizados para média 1 na amostra completa.
+    """
+    from pathlib import Path
+    arq = Path(__file__).parent / "populacao_feminina_censo2022.csv"
+    if not arq.exists():
+        return pd.Series(1.0, index=d.index)
+    P = pd.read_csv(arq)
+    peso = pd.Series(np.nan, index=d.index)
+    for mun, g in d.groupby("mun"):
+        pop = P[P.mun == mun].set_index("faixa").pop_fem.reindex(FAIXAS).fillna(0).values.astype(float)
+        n = np.array([(g.faixa == f).sum() for f in FAIXAS], dtype=float)
+        if n.sum() == 0 or pop.sum() == 0:
+            peso[g.index] = 1.0
+            continue
+        pop2 = np.where(n > 0, pop, 0.0)
+        for i in np.where((n == 0) & (pop > 0))[0]:
+            viz = np.where(n > 0)[0]
+            j = viz[np.argmin(np.abs(viz - i) - 0.1 * (viz > i))]  # empate: faixa mais velha
+            pop2[j] += pop[i]
+        w = dict(zip(FAIXAS, np.divide(pop2, n, out=np.zeros(6), where=n > 0)))
+        wi = g.faixa.astype(object).map(w).astype(float)
+        wi = wi.fillna(pop.sum() / len(g))  # sem idade
+        peso[g.index] = wi
+    return peso / peso.mean()
+
+
+def wmean(v, w):
+    m = v.notna() & w.notna()
+    return np.nan if w[m].sum() == 0 else float(np.average(v[m], weights=w[m]))
+
+
+def wmedian(v, w):
+    m = v.notna() & w.notna()
+    if not m.any():
+        return np.nan
+    o = np.argsort(v[m].values)
+    x, ww = v[m].values[o], w[m].values[o]
+    c = np.cumsum(ww)
+    return float(x[np.searchsorted(c, c[-1] / 2)])
+
+
+def n_kish(w):
+    w = w.dropna()
+    return 0 if w.empty else float(w.sum() ** 2 / (w ** 2).sum())
 
 
 df_all = carregar()
@@ -252,11 +307,24 @@ def _ajuste_idade(d, by, k):
     return y.mean() + t
 
 
+def vpond(d, k, ponderar=None):
+    """Média/proporção (ou mediana) de k, ponderada pelo Censo quando o modo 'população' está ativo."""
+    ponderar = PONDERAR if ponderar is None else ponderar
+    med = k in M and M[k][1] == "med"
+    if ponderar:
+        return wmedian(d[k], d.peso) if med else wmean(d[k], d.peso)
+    return d[k].median() if med else d[k].mean()
+
+
 def tabela(d, by, ks, ajustar=None):
+    ponderar = PONDERAR and ajustar is not False
     ajustar = AJ_IDADE if ajustar is None else ajustar
     g = d.groupby(by, observed=True)
     out = pd.DataFrame({"n": g.size()})
     for k in ks:
+        if ponderar:
+            out[k] = g.apply(lambda s: vpond(s, k, True), include_groups=False) if len(out) else np.nan
+            continue
         out[k] = g[k].median() if M[k][1] == "med" else g[k].mean()
         if ajustar and by in TERRITORIOS and k not in NAO_AJUSTAR:
             aj = _ajuste_idade(d, by, k)
@@ -412,14 +480,25 @@ def filtrar(d, ignorar=()):
 
 df = filtrar(df_all)
 st.sidebar.markdown("---")
-AJ_IDADE = st.sidebar.toggle("Ajustar territórios pela idade", value=False, key="aj_idade",
-                             help="Os municípios e macrorregiões têm idades médias diferentes (de 35 a 59 anos). Ligado, "
-                                  "mapa, rankings e painéis comparam os territórios como se todos tivessem a mesma "
-                                  "distribuição de idade (padronização indireta).")
+MODOS = {"bruto": "Bruto (amostra como coletada)", "idade": "Ajustado por idade",
+         "pop": "Ponderado pela população (Censo 2022)"}
+MODO = st.sidebar.radio("Como comparar territórios e grupos", list(MODOS), format_func=MODOS.get, key="modo_cmp",
+                        help="**Bruto:** cada participante conta igual. **Ajustado por idade:** municípios e "
+                             "macrorregiões comparados como se tivessem a mesma distribuição de idade (padronização "
+                             "indireta). **Ponderado:** cada participante representa as mulheres da sua faixa etária "
+                             "no seu município (Censo 2022); estima a prevalência da população feminina e dá a cada "
+                             "município peso proporcional à sua população.")
+AJ_IDADE = MODO == "idade"
+PONDERAR = MODO == "pop"
 if AJ_IDADE:
     st.sidebar.caption("Valores de mapa, rankings e painéis por território estão **ajustados por idade**.")
+if PONDERAR:
+    st.sidebar.caption("Indicadores, mapa, rankings e painéis estão **ponderados pela população feminina** "
+                       "(Censo 2022). Associações entre fatores de risco seguem sem ponderação.")
 st.sidebar.metric("Participantes no recorte", f"{len(df):,}".replace(",", "."))
 st.sidebar.caption(f"de {len(df_all):,} no total".replace(",", "."))
+if PONDERAR:
+    st.sidebar.caption(f"Tamanho efetivo com pesos (Kish): **{n_kish(df.peso):.0f}**".replace(",", "."))
 
 # ---------------------------------------------------------------- cabeçalho
 st.title("Observatório de Quedas · Pará")
@@ -430,7 +509,8 @@ if df.empty:
     st.stop()
 
 abas = st.tabs(["Panorama", "Índice de risco", "Municípios", "Ciclo de vida", "Fatores de risco", "Perfil de risco",
-                "Equilíbrio postural", "Sensor do celular", "Estabilogramas", "Cruzamentos", "Método"])
+                "Equilíbrio postural", "Sensor do celular", "Estabilogramas", "Agrupamentos (k-means)", "Cruzamentos",
+                "Método"])
 
 # ================================================================ PANORAMA
 with abas[0]:
@@ -440,7 +520,7 @@ with abas[0]:
           ("alto", "Vulnerabilidade alta"), ("orient", "Já recebeu orientação")]
     cols = st.columns(4)
     for i, (k, l) in enumerate(kp):
-        v, vt = df[k].mean(), df_all[k].mean()
+        v, vt = vpond(df, k), vpond(df_all, k)
         delta = None if len(df) == len(df_all) else f"{(v - vt)*100:+.1f} p.p. vs total".replace(".", ",")
         cols[i % 4].metric(l, fmt(k, v), delta, delta_color="inverse" if k != "orient" else "normal")
 
@@ -448,6 +528,10 @@ with abas[0]:
     if AJ_IDADE:
         st.info("Valores **ajustados por idade**: cada território é comparado como se tivesse a mesma distribuição "
                 "de idade do recorte. Desligue na barra lateral para ver os valores brutos.")
+    if PONDERAR:
+        st.info("Valores **ponderados pela população feminina** (Censo 2022, município × faixa etária): estimam a "
+                "situação das mulheres do município, não só das participantes. Escolha “Bruto” na barra lateral "
+                "para ver os valores da amostra.")
     st.caption("Cada município pesquisado é pintado conforme o indicador: vermelho = situação pior, amarelo = "
                "intermediária, verde = melhor, comparando os municípios entre si (terços). Cinza: sem coleta.")
     mk = sel_metrica("Indicador do mapa", key="mapa")
@@ -471,7 +555,7 @@ with abas[0]:
         f'{nomes[c]}: {fmt(mk, faixas[c][0])} a {fmt(mk, faixas[c][1])}</span>' for c in ["hi", "mid", "lo"])
         + f'<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:16px;height:16px;'
           f'border-radius:4px;background:{CLS_COR["off"]};border:1px solid #ccc"></span>Sem coleta</span>'
-          f'<br><small>Média dos municípios do recorte: <b>{fmt(mk, agg(dmap[mk], mk))}</b></small>',
+          f'<br><small>Média dos municípios do recorte: <b>{fmt(mk, vpond(dmap, mk))}</b></small>',
         unsafe_allow_html=True)
     st.markdown("**Região Metropolitana e Nordeste paraense (ampliado)**")
     st.plotly_chart(mapa_fig(GEO["inset"], vals, mk, 460, OFF_INSET), width="stretch",
@@ -632,6 +716,10 @@ with abas[2]:
     if AJ_IDADE:
         st.info("Valores **ajustados por idade**: cada território é comparado como se tivesse a mesma distribuição "
                 "de idade do recorte. Desligue na barra lateral para ver os valores brutos.")
+    if PONDERAR:
+        st.info("Valores **ponderados pela população feminina** (Censo 2022, município × faixa etária): estimam a "
+                "situação das mulheres do município, não só das participantes. Escolha “Bruto” na barra lateral "
+                "para ver os valores da amostra.")
     mk = sel_metrica("Indicador", key="rank")
     t = tabela(df, "mun", [mk]).reset_index().dropna()
     t["valor"] = t[mk] * escala(mk)
@@ -639,8 +727,8 @@ with abas[2]:
     t = t.sort_values("valor", ascending=False)
     fig = px.bar(t, x="mun", y="valor", color="macro", color_discrete_map=MACRO_COR, hover_data=["n"],
                  labels={"valor": M[mk][0], "mun": "", "macro": ""})
-    media = agg(df[mk], mk) * escala(mk)
-    fig.add_hline(y=media, line_dash="dash", line_color="#4c5856", annotation_text=f"Média {fmt(mk, agg(df[mk], mk))}")
+    media = vpond(df, mk) * escala(mk)
+    fig.add_hline(y=media, line_dash="dash", line_color="#4c5856", annotation_text=f"Média {fmt(mk, vpond(df, mk))}")
     fig.update_layout(height=440, margin=dict(t=10), xaxis_categoryorder="total descending")
     st.plotly_chart(fig, width="stretch")
 
@@ -995,7 +1083,7 @@ with abas[4]:
     cols_k = st.columns(4)
     for cc, mlab in zip(cols_k, MAC):
         sub = dmac[dmac.macro_lbl == mlab]
-        cc.metric(mlab, fmt(om, sub[om].mean()), f"n = {sub[om].notna().sum()}", delta_color="off")
+        cc.metric(mlab, fmt(om, vpond(sub, om)), f"n = {sub[om].notna().sum()}", delta_color="off")
 
     # 2. mapa de calor RP fator × macro + teste de heterogeneidade
     @st.cache_data(show_spinner=False)
@@ -2082,8 +2170,276 @@ with abas[8]:
                        "Lembre que a idade média muda entre regiões; para separar o efeito do território, filtre uma "
                        "faixa etária na barra lateral.")
 
-# ================================================================ CRUZAMENTOS
+# ================================================================ AGRUPAMENTOS (k-means)
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA as _PCA
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import adjusted_rand_score, silhouette_samples, silhouette_score
+from sklearn.preprocessing import StandardScaler
+
+KM_VARS_B = {"idade": "Idade", "imc": "IMC", "ncom": "Nº de doenças crônicas", "nmed": "Nº de medicamentos",
+             "diabetes": "Diabetes", "hipert": "Hipertensão", "dvis": "Doença visual", "osteoart": "Doença osteoarticular",
+             "dequil": "Dificuldade de equilíbrio", "vertigem": "Vertigem", "obst": "Obstáculos em casa",
+             "auxilio": "Usa auxílio p/ caminhar", "ativ": "Atividade física", "renda": "Renda (SM)", "esc": "Escolaridade",
+             "panturrilha": "Panturrilha (cm)", "cintura": "Cintura (cm)", "sono": "Horas de sono",
+             "l_area_oa": "Área da elipse OA (log)", "l_area_of": "Área da elipse OF (log)",
+             "r_sampen_ap_oa": "Entropia amostral AP OA", "l_jerk_oa": "Jerk AP OA (log)", "queda": "Queda (12 meses)"}
+KM_PADRAO_B = ["idade", "imc", "ncom", "nmed", "diabetes", "hipert", "dequil", "vertigem", "obst", "renda", "esc",
+               "l_area_oa", "r_sampen_ap_oa"]
+KM_VARS_A = {"queda": "% queda", "lesao": "% queda com lesão", "idade": "Idade média", "idoso": "% com 60+",
+             "renda": "Renda média", "esc": "Escolaridade média", "ncom": "Nº médio de doenças", "diabetes": "% diabetes",
+             "hipert": "% hipertensão", "dequil": "% dif. equilíbrio", "obst": "% obstáculos em casa",
+             "multimed": "% ≥2 medicamentos", "imc": "IMC médio", "l_area_oa": "Oscilação OA (log, mediana)",
+             "r_sampen_ap_oa": "Entropia amostral (mediana)", "orient": "% recebeu orientação", "idhm": "IDHM"}
+KM_PADRAO_A = ["queda", "idade", "renda", "esc", "ncom", "diabetes", "dequil", "obst", "l_area_oa", "idhm"]
+PAL_K = ["#2a78d6", "#eb6834", "#1baf7a", "#7a3b8f", "#eda100", "#d64541", "#0d6b6e", "#8a6d3b"]
+
+
+@st.cache_data(show_spinner=False)
+def rodar_kmeans(X, k, seed=0):
+    km = KMeans(n_clusters=k, n_init=25, random_state=seed).fit(X)
+    return km.labels_, km.cluster_centers_
+
+
+@st.cache_data(show_spinner=False)
+def curva_k(X, kmax=8):
+    out = []
+    rng = np.random.default_rng(0)
+    amostra = rng.choice(len(X), size=min(len(X), 1500), replace=False)
+    for k in range(2, kmax + 1):
+        km = KMeans(n_clusters=k, n_init=15, random_state=0).fit(X)
+        out.append(dict(k=k, inercia=km.inertia_, silhueta=silhouette_score(X[amostra], km.labels_[amostra])))
+    return pd.DataFrame(out)
+
+
+def preparar_matriz(d, cols):
+    Xr = SimpleImputer(strategy="median").fit_transform(d[cols].astype(float))
+    return StandardScaler().fit_transform(Xr)
+
+
+def graf_curva(cv, k):
+    c1_, c2_ = st.columns(2)
+    f1 = px.line(cv, x="k", y="inercia", markers=True, labels={"inercia": "Soma dos quadrados intra-grupo", "k": "Nº de grupos"},
+                 title="Método do cotovelo")
+    f1.add_vline(x=k, line_dash="dash", line_color="#d64541")
+    f1.update_layout(height=300)
+    c1_.plotly_chart(f1, width="stretch")
+    f2 = px.line(cv, x="k", y="silhueta", markers=True, labels={"silhueta": "Silhueta média", "k": "Nº de grupos"},
+                 title="Silhueta (maior = grupos mais separados)")
+    f2.add_vline(x=k, line_dash="dash", line_color="#d64541")
+    f2.update_layout(height=300)
+    c2_.plotly_chart(f2, width="stretch")
+
+
 with abas[9]:
+    st.subheader("Agrupamentos por k-means")
+    st.caption("O k-means separa os dados em k grupos de forma que os membros de cada grupo sejam o mais parecidos possível "
+               "entre si nas variáveis escolhidas. As variáveis são padronizadas (média 0, desvio 1) para que todas pesem "
+               "igual, e dados faltantes são preenchidos pela mediana. Os filtros da barra lateral valem para esta aba.")
+    dk = df.copy()
+    for c_, src in [("l_area_oa", "area_oa"), ("l_area_of", "area_of"), ("l_jerk_oa", "r_jerk_ap_oa")]:
+        dk[c_] = np.log(dk[src].where(dk[src] > 0))
+    dk["idoso"] = (dk.idade >= 60).astype(float).where(dk.idade.notna())
+    dk["multimed"] = (dk.nmed >= 2).astype(float).where(dk.nmed.notna())
+    modo_k = st.radio("O que agrupar", ["B", "A"], horizontal=True, key="km_modo",
+                      format_func={"B": "B · As mulheres (perfis individuais)",
+                                   "A": "A · Os municípios (regionalização pelo perfil de saúde)"}.get)
+
+    # ------------------------------------------------------------ B: mulheres
+    if modo_k == "B":
+        st.markdown("#### B · Perfis de mulheres")
+        b1, b2 = st.columns([3, 1])
+        vars_b = b1.multiselect("Variáveis usadas para agrupar", list(KM_VARS_B), default=KM_PADRAO_B,
+                                format_func=KM_VARS_B.get, key="km_vars_b",
+                                help="Por padrão a queda NÃO entra: assim dá para ver depois se os perfis, formados só pelas "
+                                     "características, diferem na queda.")
+        k_b = b2.slider("Nº de grupos (k)", 2, 8, 4, key="km_k_b")
+        if len(vars_b) < 2 or len(dk) < 50:
+            st.info("Escolha ao menos 2 variáveis (e um recorte com 50 ou mais participantes).")
+        else:
+            X = preparar_matriz(dk, vars_b)
+            lab, cen = rodar_kmeans(X, k_b)
+            # ordena os grupos pela taxa de queda (Perfil 1 = menor queda)
+            ordem = pd.Series(dk.queda.values).groupby(lab).mean().sort_values().index.tolist()
+            ren = {old: i + 1 for i, old in enumerate(ordem)}
+            dk["perfil"] = [f"Perfil {ren[l]}" for l in lab]
+            nomes_p = [f"Perfil {i}" for i in range(1, k_b + 1)]
+            cores_p = {n: PAL_K[i % len(PAL_K)] for i, n in enumerate(nomes_p)}
+
+            with st.expander("Quantos grupos? (cotovelo e silhueta)", expanded=False):
+                graf_curva(curva_k(X), k_b)
+                st.caption("Não há um k 'certo'. O cotovelo é onde a curva deixa de cair muito; a silhueta mede quão separados "
+                           "estão os grupos (acima de 0,25 é razoável; dados de saúde raramente passam de 0,3). k = 4 foi pedido "
+                           "por corresponder ao número de macrorregiões.")
+
+            # retrato dos perfis
+            st.markdown("**Retrato de cada perfil**")
+            Z = pd.DataFrame(X, columns=vars_b)
+            Z["perfil"] = dk["perfil"].values
+            Zm = Z.groupby("perfil")[vars_b].mean().reindex(nomes_p)
+            fig = go.Figure(go.Heatmap(z=Zm.T.values, x=nomes_p, y=[KM_VARS_B[v] for v in vars_b], colorscale="RdBu_r",
+                                       zmid=0, zmin=-1.5, zmax=1.5, text=np.round(Zm.T.values, 1), texttemplate="%{text}",
+                                       colorbar=dict(title="DP")))
+            fig.update_layout(height=max(360, 26 * len(vars_b) + 80), yaxis_autorange="reversed",
+                              margin=dict(l=10, r=10, t=10, b=10))
+            p1, p2 = st.columns([3, 2])
+            p1.plotly_chart(fig, width="stretch")
+            p1.caption("Cada célula: quanto o perfil está acima (vermelho) ou abaixo (azul) da média da amostra, em desvios-padrão.")
+            res = dk.groupby("perfil").agg(n=("perfil", "size"), idade=("idade", "mean"), queda=("queda", "mean"),
+                                           lesao=("lesao", "mean"), recorrente=("recorrente", "mean"),
+                                           irq_alto=("irq_alto", "mean"), orient=("orient", "mean")).reindex(nomes_p)
+            for c_ in ["queda", "lesao", "recorrente", "irq_alto", "orient"]:
+                res[c_] = res[c_] * 100
+            res.columns = ["n", "Idade média", "Queda %", "Com lesão %", "Recorrente %", "IRQ alto %", "Orientação %"]
+            p2.dataframe(res.style.format({"Idade média": "{:.0f}", "Queda %": "{:.0f}", "Com lesão %": "{:.0f}",
+                                           "Recorrente %": "{:.0f}", "IRQ alto %": "{:.0f}", "Orientação %": "{:.0f}"}),
+                         width="stretch")
+            from scipy.stats import chi2_contingency as _chi
+            ct = pd.crosstab(dk.perfil, dk.queda)
+            if ct.shape == (k_b, 2):
+                p2.caption(f"Os perfis estão ordenados da menor para a maior taxa de queda. Diferença de queda entre perfis: "
+                           f"p = {_chi(ct)[1]:.4f} (qui-quadrado).")
+            # descrição automática
+            desc = []
+            for n in nomes_p:
+                z = Zm.loc[n]
+                altos = [KM_VARS_B[v] for v in z.sort_values(ascending=False).index[:3] if z[v] > 0.4]
+                baixos = [KM_VARS_B[v] for v in z.sort_values().index[:2] if z[v] < -0.4]
+                desc.append(f"- **{n}** ({int(res.loc[n, 'n'])} mulheres, {res.loc[n, 'Queda %']:.0f}% caíram): "
+                            + ("mais " + ", ".join(altos).lower() if altos else "perto da média")
+                            + ("; menos " + ", ".join(baixos).lower() if baixos else "") + ".")
+            st.markdown("\n".join(desc))
+
+            # mapa 2D
+            st.markdown("**Os perfis no espaço das variáveis**")
+            pc = _PCA(2).fit(X)
+            P = pc.transform(X)
+            t = pd.DataFrame({"C1": P[:, 0], "C2": P[:, 1], "perfil": dk.perfil.values,
+                              "Queda": dk.queda.map({1: "caiu", 0: "não caiu"}).fillna("sem dado").values})
+            fig = px.scatter(t, x="C1", y="C2", color="perfil", symbol="Queda", color_discrete_map=cores_p, opacity=0.7,
+                             category_orders={"perfil": nomes_p},
+                             labels={"C1": f"Componente 1 ({pc.explained_variance_ratio_[0]*100:.0f}%)",
+                                     "C2": f"Componente 2 ({pc.explained_variance_ratio_[1]*100:.0f}%)", "perfil": ""})
+            fig.update_traces(marker=dict(size=6))
+            fig.update_layout(height=460, legend_orientation="h")
+            st.plotly_chart(fig, width="stretch")
+            st.caption("Projeção das variáveis em 2 dimensões (componentes principais), só para visualizar: os grupos foram "
+                       "formados com todas as variáveis.")
+
+            # distribuição nas macros e municípios
+            st.markdown("**Como os perfis se distribuem nas macrorregiões**")
+            q1, q2 = st.columns(2)
+            ct = pd.crosstab(dk.macro_lbl, dk.perfil, normalize="index").reindex(columns=nomes_p) * 100
+            t = ct.reset_index().melt("macro_lbl", var_name="perfil", value_name="pct")
+            fig = px.bar(t, x="macro_lbl", y="pct", color="perfil", color_discrete_map=cores_p,
+                         category_orders={"perfil": nomes_p}, text=t.pct.round(0).astype(int).astype(str) + "%",
+                         labels={"pct": "% das mulheres da macrorregião", "macro_lbl": "", "perfil": ""})
+            fig.update_layout(height=420, legend_orientation="h", barmode="stack")
+            q1.plotly_chart(fig, width="stretch")
+            ctc = pd.crosstab(dk.macro_lbl, dk.perfil)
+            p_m = _chi(ctc)[1] if ctc.shape[0] > 1 else np.nan
+            q1.caption(f"Teste se a mistura de perfis difere entre as macrorregiões: p = {p_m:.4f} (qui-quadrado). "
+                       "p ≥ 0,05 = as macrorregiões têm composição parecida.")
+            cm_ = pd.crosstab(dk.mun, dk.perfil, normalize="index").reindex(columns=nomes_p) * 100
+            cm_ = cm_.sort_values(nomes_p[-1], ascending=False)
+            fig = go.Figure(go.Heatmap(z=cm_.values, x=nomes_p, y=cm_.index, colorscale="Blues", text=np.round(cm_.values),
+                                       texttemplate="%{text:.0f}", colorbar=dict(title="%")))
+            fig.update_layout(height=max(420, 20 * len(cm_) + 60), yaxis_autorange="reversed", margin=dict(l=10, r=10, t=30, b=10),
+                              title=f"Municípios ordenados pela fração no {nomes_p[-1]} (maior queda)")
+            q2.plotly_chart(fig, width="stretch")
+            st.download_button("Baixar perfil de cada participante (CSV, anonimizado)",
+                               dk[["id", "mun", "macro_lbl", "perfil"]].to_csv(index=False).encode("utf-8-sig"),
+                               "perfis_kmeans.csv", "text/csv")
+
+    # ------------------------------------------------------------ A: municípios
+    else:
+        st.markdown("#### A · Regionalização dos municípios pelo perfil de saúde")
+        a1, a2 = st.columns([3, 1])
+        vars_a = a1.multiselect("Indicadores municipais usados para agrupar", list(KM_VARS_A), default=KM_PADRAO_A,
+                                format_func=KM_VARS_A.get, key="km_vars_a")
+        k_a = a2.slider("Nº de grupos (k)", 2, 6, 4, key="km_k_a")
+        agg_ = {v: (v, "median" if v in ("l_area_oa", "r_sampen_ap_oa") else "mean") for v in set(vars_a) | {"queda"}}
+        MA = dk.groupby("mun").agg(n=("id", "size"), **agg_)
+        MA = MA[MA.n >= 10]
+        if len(vars_a) < 2 or len(MA) < k_a + 2:
+            st.info("Escolha ao menos 2 indicadores e mantenha municípios suficientes no recorte.")
+        else:
+            XA = preparar_matriz(MA, vars_a)
+            lab, cen = rodar_kmeans(XA, k_a)
+            ordem = pd.Series(MA.queda.values).groupby(lab).mean().sort_values().index.tolist()
+            ren = {old: i + 1 for i, old in enumerate(ordem)}
+            MA["grupo"] = [f"Grupo {ren[l]}" for l in lab]
+            nomes_g = [f"Grupo {i}" for i in range(1, k_a + 1)]
+            cores_g = {n: PAL_K[i % len(PAL_K)] for i, n in enumerate(nomes_g)}
+            MA["macro"] = MA.index.map(df_all.drop_duplicates("mun").set_index("mun").macro_lbl)
+            MA["silhueta"] = silhouette_samples(XA, lab) if k_a > 1 else np.nan
+
+            with st.expander("Quantos grupos? (cotovelo e silhueta)", expanded=False):
+                graf_curva(curva_k(XA, kmax=min(8, len(MA) - 1)), k_a)
+
+            # mapa
+            g1, g2 = st.columns([3, 2])
+            fig = go.Figure()
+            for f in GEO["main"]["features"]:
+                x, y = _xy(f)
+                m = f["properties"]["mun"]
+                if m in MA.index:
+                    gname = MA.loc[m, "grupo"]
+                    fig.add_trace(go.Scatter(x=x, y=y, fill="toself", fillcolor=cores_g[gname], mode="lines",
+                                             line=dict(color="white", width=1), hoveron="fills",
+                                             text=f"<b>{m}</b><br>{gname} · {MA.loc[m, 'macro']}", hoverinfo="text",
+                                             showlegend=False))
+                else:
+                    fig.add_trace(go.Scatter(x=x, y=y, fill="toself", fillcolor="#e4e8e6", mode="lines",
+                                             line=dict(color="white", width=0.5), hoverinfo="skip", showlegend=False))
+            for gname in nomes_g:
+                fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", marker=dict(size=12, color=cores_g[gname],
+                                         symbol="square"), name=gname))
+            for m, r in MA.iterrows():
+                feat = next((f for f in GEO["main"]["features"] if f["properties"]["mun"] == m), None)
+                if feat:
+                    cx, cy = feat["properties"]["c"]
+                    fig.add_annotation(x=cx, y=cy, text=m, showarrow=False, font=dict(size=9, color="#14201f"),
+                                       bgcolor="rgba(255,255,255,.7)")
+            fig.update_xaxes(visible=False)
+            fig.update_yaxes(visible=False, scaleanchor="x")
+            fig.update_layout(height=560, margin=dict(l=0, r=0, t=10, b=0), legend_orientation="h",
+                              plot_bgcolor="rgba(0,0,0,0)")
+            g1.plotly_chart(fig, width="stretch")
+
+            ct = pd.crosstab(MA.grupo, MA.macro).reindex(nomes_g)
+            ari = adjusted_rand_score(MA.macro, MA.grupo)
+            g2.markdown("**Grupos encontrados × macrorregiões**")
+            g2.dataframe(ct, width="stretch")
+            g2.metric("Concordância com as macrorregiões (ARI)", f"{ari:.2f}".replace(".", ","),
+                      help="Índice de Rand ajustado: 1 = os grupos são exatamente as macrorregiões; 0 = concordância igual "
+                           "à do acaso; negativo = menos que o acaso.")
+            g2.caption("ARI perto de 0 indica que o perfil de saúde dos municípios **não** segue a divisão administrativa: "
+                       "municípios de macrorregiões diferentes podem ser mais parecidos entre si do que com os vizinhos.")
+
+            st.markdown("**Retrato de cada grupo**")
+            ZA = pd.DataFrame(XA, columns=vars_a, index=MA.index)
+            ZA["grupo"] = MA.grupo
+            Zg = ZA.groupby("grupo")[vars_a].mean().reindex(nomes_g)
+            fig = go.Figure(go.Heatmap(z=Zg.T.values, x=nomes_g, y=[KM_VARS_A[v] for v in vars_a], colorscale="RdBu_r",
+                                       zmid=0, zmin=-1.5, zmax=1.5, text=np.round(Zg.T.values, 1), texttemplate="%{text}",
+                                       colorbar=dict(title="DP")))
+            fig.update_layout(height=max(340, 28 * len(vars_a) + 80), yaxis_autorange="reversed",
+                              margin=dict(l=10, r=10, t=10, b=10))
+            h1, h2 = st.columns([3, 2])
+            h1.plotly_chart(fig, width="stretch")
+            lista = MA.reset_index()[["mun", "grupo", "macro", "n", "queda", "silhueta"]].sort_values(["grupo", "queda"])
+            lista["queda"] = lista.queda * 100
+            h2.dataframe(lista.rename(columns={"mun": "Município", "grupo": "Grupo", "macro": "Macrorregião",
+                                               "queda": "Queda %", "silhueta": "Silhueta"}),
+                         hide_index=True, width="stretch", height=520,
+                         column_config={"Queda %": st.column_config.NumberColumn(format="%.0f"),
+                                        "Silhueta": st.column_config.NumberColumn(format="%.2f")})
+            h2.caption("Silhueta baixa ou negativa = município 'no meio do caminho' entre dois grupos. Com 22 municípios, os "
+                       "grupos podem mudar se você trocar os indicadores: use como apoio à discussão, não como classificação definitiva.")
+
+# ================================================================ CRUZAMENTOS
+with abas[10]:
     st.subheader("Tabela de cruzamentos")
     st.caption("Combine quaisquer duas dimensões e um indicador. Células com menos de 10 participantes ficam em branco.")
     c1, c2, c3 = st.columns(3)
@@ -2116,7 +2472,7 @@ with abas[9]:
     st.download_button("Baixar tabela (CSV)", val.to_csv().encode("utf-8-sig"), "cruzamento.csv", "text/csv")
 
 # ================================================================ MÉTODO
-with abas[10]:
+with abas[11]:
     st.subheader("Como os dados foram tratados")
     mac = df_all.drop_duplicates("mun").groupby("macro_lbl").apply(
         lambda g: f"**{g.name}** ({', '.join(sorted(g.reg.unique()))}): {', '.join(sorted(g.mun))}")
@@ -2149,7 +2505,32 @@ Desempenho por validação cruzada 5×20 (pontos recalculados em cada repetiçã
 - Estabilometria resumida por mediana (distribuições com cauda longa).
 - Razão de prevalência com IC 95% pelo método do log; fatores com menos de 5 casos expostos são omitidos.
 - Regressão logística (queda) e linear (log da área da elipse OA/OF) com statsmodels, casos completos.
+
+**Três formas de comparar territórios** (seletor na barra lateral)
+- **Bruto:** cada participante conta igual. A idade média varia de 35 a 59 anos entre municípios.
+- **Ajustado por idade:** padronização indireta (razão observado/esperado pela idade, com idade e idade² em regressão)
+  aplicada a município, região e macrorregião. Mantém o peso de cada participante.
+- **Ponderado pela população (pós-estratificação):** peso = mulheres da célula município × faixa etária no Censo 2022
+  (IBGE, SIDRA tabela 9514, população residente feminina) ÷ participantes na mesma célula. Faixa 18–29 usa a população
+  de 20–29 (a tabela parte de 20 anos). Células sem participante têm a população somada à faixa vizinha. Os pesos corrigem
+  a composição por idade e o tamanho de cada município (Belém pesa mais que Nova Ipixuna), mas **não corrigem o recrutamento
+  por conveniência**: quem participou pode diferir de quem não participou na mesma faixa e município. O tamanho efetivo de
+  Kish mostra quanta precisão se perde. Associações entre fatores (RP, OR, modelos) seguem sem ponderação, porque estimam
+  relações e não prevalências.
 """)
+    p = df_all.groupby("mun").agg(n=("peso", "size"), peso_med=("peso", "mean"), peso_max=("peso", "max"))
+    tw = pd.DataFrame({k: [vpond(df_all, k, False), vpond(df_all, k, True)] for k in
+                       ["queda", "lesao", "recorrente", "dequil", "obst", "idade"]}, index=["Bruto", "Ponderado"]).T
+    tw.index = [M[k][0] if k in M else "Idade média" for k in tw.index]
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Estado (22 municípios): bruto × ponderado**")
+        st.dataframe(tw.style.format(lambda v: f"{v*100:.1f}%" if v < 1.5 else f"{v:.1f}"), width="stretch")
+        st.caption(f"Tamanho efetivo (Kish) da amostra completa: {n_kish(df_all.peso):.0f} de {len(df_all)}.")
+    with c2:
+        st.markdown("**Peso médio por município**")
+        st.dataframe(p.sort_values("peso_med", ascending=False).style.format({"peso_med": "{:.2f}", "peso_max": "{:.2f}"}),
+                     width="stretch", height=300)
     res, ols = modelos()
     st.markdown("**Regressão linear da oscilação (log da área da elipse)**")
     t = ols["area_oa"].merge(ols["area_of"], on="Fator", suffixes=(" OA", " OF"))

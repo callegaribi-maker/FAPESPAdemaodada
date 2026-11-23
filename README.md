@@ -7,9 +7,10 @@ Painel interativo (Streamlit) do projeto **"De mãos dadas para não deixar cair
 - Filtros por macrorregião, município, faixa etária, cor/raça, escolaridade, renda e condição de saúde
 - Dados lidos de `Planilha_Unica_22Municipios_anonimizada.xlsx` (mesma estrutura da planilha do projeto, com nome trocado pelo ID e telefone/endereço apagados), processados por `preparar_dados.py`
 - Estabilometria: valores do sinal bruto do celular reprocessado; quem não tem arquivo bruto válido mantém o valor original, convertido por `calibracao_estabilometria.json`
+- Ponderação populacional: `populacao_feminina_censo2022.csv` (IBGE, Censo 2022, SIDRA tabela 9514, mulheres por município e faixa etária) gera pesos de pós-estratificação município × idade
 
 ## Arquivos do repositório
-`app.py`, `preparar_dados.py`, `Planilha_Unica_22Municipios_anonimizada.xlsx`, `calibracao_estabilometria.json`, `sensor_validacao.json`, `sinais_brutos.json`, `pa_municipios.geojson`, `requirements.txt`, `.streamlit/config.toml`
+`app.py`, `preparar_dados.py`, `Planilha_Unica_22Municipios_anonimizada.xlsx`, `calibracao_estabilometria.json`, `sensor_validacao.json`, `sinais_brutos.json`, `trajetorias_estabilograma.npz`, `pa_municipios.geojson`, `populacao_feminina_censo2022.csv`, `requirements.txt`, `.streamlit/config.toml`
 
 ## Rodar localmente
 ```bash
