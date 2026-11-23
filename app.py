@@ -209,11 +209,59 @@ def fmt(k, v):
     return f"{v:.2f}".replace(".", ",")
 
 
-def tabela(d, by, ks):
+TERRITORIOS = ("mun", "reg", "macro_lbl")
+NAO_AJUSTAR = {"idade", "idoso", "idhm", "irq", "irq_alto", "score", "alto"}  # medidas que já contêm a idade
+
+
+def _ajuste_idade(d, by, k):
+    """Valor por território ajustado pela idade (padronização indireta pelo próprio recorte).
+
+    Proporções: taxa observada / taxa esperada pela idade das participantes × taxa geral (razão O/E).
+    Médias: média geral + média dos resíduos (valor − esperado pela idade).
+    Medianas (estabilometria): em log, mediana geral × exp(mediana dos resíduos).
+    """
+    x = d[[by, k, "idade"]].dropna()
+    if len(x) < 30 or x[k].nunique() < 2:
+        return None
+    a = x.idade.values
+    A = np.column_stack([np.ones(len(a)), (a - 45) / 10, ((a - 45) / 10) ** 2])
+    tipo = M[k][1]
+    if tipo == "p":
+        try:
+            m = sm.Logit(x[k].values.astype(float), A).fit(disp=0, maxiter=100)
+            esp = m.predict(A)
+        except Exception:
+            return None
+        geral = x[k].mean()
+        t = pd.DataFrame({"g": x[by].values, "o": x[k].values, "e": esp}).groupby("g", observed=True)[["o", "e"]].sum()
+        return (t.o / t.e * geral).clip(0, 1)
+    if tipo == "med":
+        v = x[k].values
+        if (v <= 0).any():
+            return None
+        y = np.log(v)
+        beta = np.linalg.lstsq(A, y, rcond=None)[0]
+        r = y - A @ beta
+        base = np.median(y)
+        t = pd.DataFrame({"g": x[by].values, "r": r}).groupby("g", observed=True).r.median()
+        return np.exp(base + t)
+    y = x[k].values.astype(float)
+    beta = np.linalg.lstsq(A, y, rcond=None)[0]
+    r = y - A @ beta
+    t = pd.DataFrame({"g": x[by].values, "r": r}).groupby("g", observed=True).r.mean()
+    return y.mean() + t
+
+
+def tabela(d, by, ks, ajustar=None):
+    ajustar = AJ_IDADE if ajustar is None else ajustar
     g = d.groupby(by, observed=True)
     out = pd.DataFrame({"n": g.size()})
     for k in ks:
         out[k] = g[k].median() if M[k][1] == "med" else g[k].mean()
+        if ajustar and by in TERRITORIOS and k not in NAO_AJUSTAR:
+            aj = _ajuste_idade(d, by, k)
+            if aj is not None:
+                out[k] = aj.reindex(out.index)
     return out
 
 
@@ -363,6 +411,13 @@ def filtrar(d, ignorar=()):
 
 
 df = filtrar(df_all)
+st.sidebar.markdown("---")
+AJ_IDADE = st.sidebar.toggle("Ajustar territórios pela idade", value=False, key="aj_idade",
+                             help="Os municípios e macrorregiões têm idades médias diferentes (de 35 a 59 anos). Ligado, "
+                                  "mapa, rankings e painéis comparam os territórios como se todos tivessem a mesma "
+                                  "distribuição de idade (padronização indireta).")
+if AJ_IDADE:
+    st.sidebar.caption("Valores de mapa, rankings e painéis por território estão **ajustados por idade**.")
 st.sidebar.metric("Participantes no recorte", f"{len(df):,}".replace(",", "."))
 st.sidebar.caption(f"de {len(df_all):,} no total".replace(",", "."))
 
@@ -390,6 +445,9 @@ with abas[0]:
         cols[i % 4].metric(l, fmt(k, v), delta, delta_color="inverse" if k != "orient" else "normal")
 
     st.subheader("Mapa do risco no Pará")
+    if AJ_IDADE:
+        st.info("Valores **ajustados por idade**: cada território é comparado como se tivesse a mesma distribuição "
+                "de idade do recorte. Desligue na barra lateral para ver os valores brutos.")
     st.caption("Cada município pesquisado é pintado conforme o indicador: vermelho = situação pior, amarelo = "
                "intermediária, verde = melhor, comparando os municípios entre si (terços). Cinza: sem coleta.")
     mk = sel_metrica("Indicador do mapa", key="mapa")
@@ -571,6 +629,9 @@ with abas[1]:
 # ================================================================ MUNICÍPIOS
 with abas[2]:
     st.subheader("Ranking de municípios")
+    if AJ_IDADE:
+        st.info("Valores **ajustados por idade**: cada território é comparado como se tivesse a mesma distribuição "
+                "de idade do recorte. Desligue na barra lateral para ver os valores brutos.")
     mk = sel_metrica("Indicador", key="rank")
     t = tabela(df, "mun", [mk]).reset_index().dropna()
     t["valor"] = t[mk] * escala(mk)
