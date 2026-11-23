@@ -100,6 +100,11 @@ def carregar():
     d["q4_vel_oa"] = _quartil("r_path_vel_oa")
     d["q4_jerk_oa"] = _quartil("r_jerk_ap_oa")
     d["q1_sampen_oa"] = _quartil("r_sampen_ap_oa", alto=False)
+    d["q4_rmsap_of"] = _quartil("rmsap_of")
+    d["q4_rmsml_of"] = _quartil("rmsml_of")
+    d["q4_vel_of"] = _quartil("r_path_vel_of")
+    d["q4_jerk_of"] = _quartil("r_jerk_ap_of")
+    d["q1_sampen_of"] = _quartil("r_sampen_ap_of", alto=False)
     d["q4_romberg"] = _quartil("romberg")
     d["oscil_g"] = np.where(d.area_oa.isna(), None, np.where(d.area_oa >= p75, "Quartil superior",
                             np.where(d.area_oa <= p25, "Quartil inferior", "Intermediária")))
@@ -748,12 +753,19 @@ with abas[4]:
                    "verde = reduz; cinza = sem significância.")
         outc = {"queda": "Queda (12 meses)", "lesao": "Queda com lesão", "recorrente": "Quedas recorrentes",
                 "dequil": "Dificuldade de equilíbrio",
-                "hiosc": "Celular · Área da elipse OA alta (Q4)", "q4_area_of": "Celular · Área da elipse OF alta (Q4)",
-                "q4_rmsap_oa": "Celular · RMS antero-posterior OA alto (Q4)",
-                "q4_rmsml_oa": "Celular · RMS médio-lateral OA alto (Q4)",
-                "q4_vel_oa": "Celular · Velocidade média OA alta (Q4)", "q4_jerk_oa": "Celular · Jerk AP OA alto (Q4)",
-                "q1_sampen_oa": "Celular · Entropia amostral AP baixa (Q1, balanço rígido)",
-                "q4_romberg": "Celular · Quociente de Romberg alto (Q4, depende mais da visão)"}
+                "hiosc": "Celular OA · Área da elipse alta (Q4)",
+                "q4_rmsap_oa": "Celular OA · RMS antero-posterior alto (Q4)",
+                "q4_rmsml_oa": "Celular OA · RMS médio-lateral alto (Q4)",
+                "q4_vel_oa": "Celular OA · Velocidade média alta (Q4)",
+                "q4_jerk_oa": "Celular OA · Jerk AP alto (Q4)",
+                "q1_sampen_oa": "Celular OA · Entropia amostral AP baixa (Q1, balanço rígido)",
+                "q4_area_of": "Celular OF · Área da elipse alta (Q4)",
+                "q4_rmsap_of": "Celular OF · RMS antero-posterior alto (Q4)",
+                "q4_rmsml_of": "Celular OF · RMS médio-lateral alto (Q4)",
+                "q4_vel_of": "Celular OF · Velocidade média alta (Q4)",
+                "q4_jerk_of": "Celular OF · Jerk AP alto (Q4)",
+                "q1_sampen_of": "Celular OF · Entropia amostral AP baixa (Q1, balanço rígido)",
+                "q4_romberg": "Celular OF/OA · Quociente de Romberg alto (Q4, depende mais da visão)"}
         ok = st.selectbox("Desfecho", list(outc), format_func=outc.get)
         rows = []
         celular = ok.startswith(("hiosc", "q4_", "q1_"))
