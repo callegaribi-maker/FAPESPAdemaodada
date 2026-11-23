@@ -697,8 +697,17 @@ def modelos():
            "log_area_oa": "Oscilação OA (log área elipse)"}
     base = ["idade10", "macro_II", "macro_III", "macro_IV", "esc", "renda", "obes", "pant31", "dvis", "hipert",
             "diabetes", "osteoart", "depans", "dneu", "multimed", "obst", "ativ", "alcool"]
+    # estabilometria sozinha: medidas padronizadas (OR por +1 desvio-padrão), uma de cada aspecto do sinal
+    est = {"z_area_oa": ("area_oa", True, "Área da elipse OA (+1 DP)"), "z_area_of": ("area_of", True, "Área da elipse OF (+1 DP)"),
+           "z_jerk_oa": ("r_jerk_ap_oa", True, "Jerk AP OA (+1 DP)"), "z_sampen_oa": ("r_sampen_ap_oa", False, "Entropia amostral AP OA (+1 DP)"),
+           "z_f50_oa": ("fap_oa", False, "Freq. mediana AP OA (+1 DP)")}
+    for k_, (c_, lg, l_) in est.items():
+        v_ = np.log(d[c_].where(d[c_] > 0)) if lg else d[c_]
+        d[k_] = (v_ - v_.mean()) / v_.std()
+        lab[k_] = l_
     sets = {"A · Clínico": base, "B · + sintomas": base + ["vertigem", "dequil"],
-            "C · + estabilometria": base + ["vertigem", "dequil", "log_area_oa"]}
+            "C · + estabilometria": base + ["vertigem", "dequil", "log_area_oa"],
+            "D · Só estabilometria": list(est)}
     res = {}
     for nome, X in sets.items():
         dd = d[["queda"] + X].dropna()
@@ -749,7 +758,9 @@ with abas[4]:
         for r in m["rows"]:
             r["hover"] = f"{r['nome']}<br>OR {r['v']:.2f} (IC {r['lo']:.2f}–{r['hi']:.2f})<br>p = {r['p']:.3f}"
         st.plotly_chart(forest(m["rows"], "OR ajustada (escala log)"), width="stretch")
-        st.caption(f"{m['n']} participantes com dados completos, {m['ev']} com queda. Pseudo-R² {m['r2']*100:.1f}%.")
+        st.caption(f"{m['n']} participantes com dados completos, {m['ev']} com queda. Pseudo-R² {m['r2']*100:.1f}%."
+                   + (" Modelo D: só as medidas do celular, sem idade nem clínica; cada OR vale para +1 desvio-padrão "
+                      "da medida, e as cinco medidas foram ajustadas entre si." if mn.startswith("D") else ""))
 
     # ---------------------------------------------------------------- por macrorregião
     st.markdown("---")
