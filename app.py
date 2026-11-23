@@ -89,6 +89,18 @@ def carregar():
     p75 = d.area_oa.quantile(0.75)
     p25 = d.area_oa.quantile(0.25)
     d["hiosc"] = np.where(d.area_oa.isna(), np.nan, (d.area_oa >= p75).astype(float))
+    # outras medidas do celular como desfecho: quartil de pior desempenho (Q4; para entropia, Q1 = balanço mais rígido)
+    def _quartil(col, alto=True):
+        v = d[col]
+        q = v.quantile(0.75 if alto else 0.25)
+        return np.where(v.isna(), np.nan, ((v >= q) if alto else (v <= q)).astype(float))
+    d["q4_area_of"] = _quartil("area_of")
+    d["q4_rmsap_oa"] = _quartil("rmsap_oa")
+    d["q4_rmsml_oa"] = _quartil("rmsml_oa")
+    d["q4_vel_oa"] = _quartil("r_path_vel_oa")
+    d["q4_jerk_oa"] = _quartil("r_jerk_ap_oa")
+    d["q1_sampen_oa"] = _quartil("r_sampen_ap_oa", alto=False)
+    d["q4_romberg"] = _quartil("romberg")
     d["oscil_g"] = np.where(d.area_oa.isna(), None, np.where(d.area_oa >= p75, "Quartil superior",
                             np.where(d.area_oa <= p25, "Quartil inferior", "Intermediária")))
     f = lambda s: s.fillna(0)
@@ -735,11 +747,18 @@ with abas[4]:
         st.caption("Razão de prevalência (RP) bruta com IC 95%, recalculada com os filtros. Vermelho = aumenta; "
                    "verde = reduz; cinza = sem significância.")
         outc = {"queda": "Queda (12 meses)", "lesao": "Queda com lesão", "recorrente": "Quedas recorrentes",
-                "dequil": "Dificuldade de equilíbrio", "hiosc": "Oscilação OA alta (Q4)"}
+                "dequil": "Dificuldade de equilíbrio",
+                "hiosc": "Celular · Área da elipse OA alta (Q4)", "q4_area_of": "Celular · Área da elipse OF alta (Q4)",
+                "q4_rmsap_oa": "Celular · RMS antero-posterior OA alto (Q4)",
+                "q4_rmsml_oa": "Celular · RMS médio-lateral OA alto (Q4)",
+                "q4_vel_oa": "Celular · Velocidade média OA alta (Q4)", "q4_jerk_oa": "Celular · Jerk AP OA alto (Q4)",
+                "q1_sampen_oa": "Celular · Entropia amostral AP baixa (Q1, balanço rígido)",
+                "q4_romberg": "Celular · Quociente de Romberg alto (Q4, depende mais da visão)"}
         ok = st.selectbox("Desfecho", list(outc), format_func=outc.get)
         rows = []
+        celular = ok.startswith(("hiosc", "q4_", "q1_"))
         for k, nome in EXPOS.items():
-            if k == ok:
+            if k == ok or (celular and k == "hiosc"):
                 continue
             r = rp(df, k, ok)
             if r and r["a"] >= 5:
