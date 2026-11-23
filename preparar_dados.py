@@ -42,6 +42,21 @@ MUN = {'AUGUSTO CORREA': ('Augusto Corrêa', 'II', 'Rio Caetés', -1.0219, -46.6
        'MARABA': ('Marabá', 'IV', 'Carajás', -5.3686, -49.1178),
        'PARAUAPEBAS': ('Parauapebas', 'IV', 'Carajás', -6.0675, -49.9022)}
 
+
+# IDHM 2010 (PNUD/IPEA/FJP, Atlas do Desenvolvimento Humano no Brasil): total, renda, longevidade, educação.
+# É o dado municipal mais recente; o Radar IDHM posterior traz só estados e regiões metropolitanas.
+IDHM = {'Augusto Corrêa': (0.520, 0.480, 0.772, 0.380), 'Capanema': (0.655, 0.610, 0.794, 0.580),
+        'Bragança': (0.600, 0.589, 0.755, 0.486), 'Tracuateua': (0.531, 0.514, 0.776, 0.376),
+        'Cachoeira do Piriá': (0.473, 0.449, 0.779, 0.303), 'Castanhal': (0.673, 0.654, 0.800, 0.582),
+        'Belém': (0.746, 0.751, 0.822, 0.673), 'Ananindeua': (0.718, 0.684, 0.821, 0.658),
+        'Marituba': (0.676, 0.621, 0.793, 0.628), 'Oeiras do Pará': (0.507, 0.502, 0.754, 0.344),
+        'Altamira': (0.665, 0.662, 0.811, 0.548), 'Vitória do Xingu': (0.596, 0.594, 0.792, 0.451),
+        'Juruti': (0.592, 0.547, 0.756, 0.501), 'Óbidos': (0.594, 0.556, 0.756, 0.499),
+        'Oriximiná': (0.623, 0.599, 0.778, 0.520), 'Santarém': (0.691, 0.632, 0.807, 0.648),
+        'Itaituba': (0.640, 0.644, 0.800, 0.510), 'Itupiranga': (0.528, 0.543, 0.746, 0.364),
+        'Tucuruí': (0.666, 0.675, 0.800, 0.548), 'Nova Ipixuna': (0.581, 0.590, 0.766, 0.435),
+        'Marabá': (0.668, 0.673, 0.785, 0.564), 'Parauapebas': (0.715, 0.701, 0.809, 0.644)}
+
 # 12 medidas da planilha -> nome curto usado no app
 EST = {'RMS AP': 'RMS AP', 'RMS ML': 'RMS ML', 'Desvio total': 'Desvio total', 'Area elipse 95%': 'Área elipse',
        'Frequencia mediana AP (Hz)': 'Freq. mediana AP', 'Frequencia mediana ML (Hz)': 'Freq. mediana ML',
@@ -211,6 +226,8 @@ def preparar(caminho=None, calibracao="calibracao_estabilometria.json"):
     o['mun'] = df.Municipio_sheet.map(lambda k: MUN[k][0]).values
     o['macro'] = df.Municipio_sheet.map(lambda k: MUN[k][1]).values
     o['reg'] = df.Municipio_sheet.map(lambda k: MUN[k][2]).values
+    for i, k in enumerate(['idhm', 'idhm_renda', 'idhm_long', 'idhm_educ']):
+        o[k] = o['mun'].map(lambda m: IDHM[m][i]).astype(float)
     age = df['Idade'].map(num)
     o['idade'] = age.where((age >= 15) & (age <= 105)).values
     c = df['Cor'].map(norm)

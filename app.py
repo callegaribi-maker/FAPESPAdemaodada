@@ -113,6 +113,9 @@ def carregar():
                   + f(d.diabetes) + f(d.dvis) + f(d.dneu) + f(d.multimed) + f(d.hiosc))
     d["alto"] = (d.score >= 4).astype(float)
     d["risco_g"] = pd.cut(d.score, [-1, 1, 3, 99], labels=["Baixa", "Moderada", "Alta"])
+    d["idhm_g"] = pd.cut(d.idhm, [0, 0.4999, 0.5999, 0.6999, 0.7999, 1],
+                         labels=["Muito baixo (<0,5)", "Baixo (0,5–0,599)", "Médio (0,6–0,699)", "Alto (0,7–0,799)",
+                                 "Muito alto (≥0,8)"])
     # Índice de Risco de Quedas (IRQ-Pará), pontos derivados da regressão logística
     d["irq"] = (np.where(d.idade >= 60, 3, np.where(d.idade >= 40, 2, 0)) + 2 * f(d.diabetes) + 2 * f(d.dequil)
                 + 2 * f(d.obst) + f(d.vertigem) + 3 * f(d.auxilio) + 2 * f(d.cores))
@@ -142,6 +145,7 @@ M["multimed"] = ("Usa ≥2 medicamentos (%)", "p", "Saúde")
 M["ncom"] = ("Nº médio de condições crônicas", "m", "Saúde")
 M["idoso"] = ("Idosas ≥60 (%)", "p", "Perfil")
 M["idade"] = ("Idade média", "m", "Perfil")
+M["idhm"] = ("IDHM do município (2010)", "m", "Perfil")
 M["renda"] = ("Renda média (SM)", "m", "Perfil")
 M["r1"] = ("Renda < 1 SM (%)", "p", "Perfil")
 M["baixaesc"] = ("Até fund. incompleto (%)", "p", "Perfil")
@@ -162,7 +166,7 @@ DIMS = {
     "cor": "Cor/raça", "civil": "Estado civil", "esc_g": "Escolaridade", "renda_g": "Renda familiar",
     "imc_g": "IMC", "cint_g": "Cintura", "pant_g": "Panturrilha", "pa_g": "Pressão aferida", "sono_g": "Sono",
     "nmed_g": "Nº de medicamentos", "ncom_g": "Nº de condições crônicas", "risco_g": "Vulnerabilidade a quedas",
-    "oscil_g": "Oscilação OA", "irq_g": "IRQ-Pará (classe de risco)",
+    "oscil_g": "Oscilação OA", "irq_g": "IRQ-Pará (classe de risco)", "idhm_g": "IDHM do município (faixa PNUD)",
 }
 DIMS.update({"b_" + k: v + " (Sim/Não)" for k, v in BINLBL.items()})
 
@@ -592,7 +596,9 @@ with abas[2]:
     caracts = {"idade": "Idade média", "idoso": "% com 60+ anos", "renda": "Renda média (SM)", "esc": "Escolaridade média",
                "ncom": "Nº médio de doenças crônicas", "diabetes": "% com diabetes", "dequil": "% com dificuldade de equilíbrio",
                "vertigem": "% com vertigem", "obst": "% com obstáculos em casa", "orient": "% que recebeu orientação",
-               "multimed": "% com ≥2 medicamentos", "area_oa": "Oscilação OA (mediana)", "irq": "IRQ-Pará médio"}
+               "multimed": "% com ≥2 medicamentos", "area_oa": "Oscilação OA (mediana)", "irq": "IRQ-Pará médio",
+               "idhm": "IDHM (2010)", "idhm_renda": "IDHM Renda", "idhm_long": "IDHM Longevidade",
+               "idhm_educ": "IDHM Educação"}
     agg_m = df.groupby("mun").agg(queda=("queda", "mean"), n=("queda", "size"),
                                   **{k: (k, "median" if k == "area_oa" else "mean") for k in caracts})
     agg_m = agg_m[agg_m.n >= 10]
@@ -629,6 +635,110 @@ with abas[2]:
         st.caption("Na amostra completa: municípios com população mais velha, mais doenças crônicas, mais dificuldade de "
                    "equilíbrio, menor renda e menor escolaridade têm mais quedas. Com só 22 municípios, correlações "
                    "abaixo de ~0,42 não atingem significância.")
+
+
+    # ---------------------------------------------------------------- IDHM
+    st.markdown("---")
+    st.subheader("Desenvolvimento humano do município (IDHM) e quedas")
+    st.caption("IDHM 2010 do Atlas do Desenvolvimento Humano no Brasil (PNUD/IPEA/FJP), o dado municipal mais recente. "
+               "Varia de 0 a 1 e combina renda, longevidade e educação. Nos 22 municípios vai de 0,473 (Cachoeira do Piriá) "
+               "a 0,746 (Belém).")
+    IDC = {"idhm": "IDHM", "idhm_renda": "IDHM Renda", "idhm_long": "IDHM Longevidade", "idhm_educ": "IDHM Educação"}
+    IDY = {"queda": "Queda (%)", "lesao": "Queda com lesão (%)", "recorrente": "Quedas recorrentes (%)",
+           "irq_alto": "IRQ alto/muito alto (%)", "dequil": "Dificuldade de equilíbrio (%)", "diabetes": "Diabetes (%)",
+           "area_oa": "Área da elipse OA (mediana)", "r_sampen_ap_oa": "Entropia amostral AP OA (mediana)",
+           "idade": "Idade média", "renda": "Renda média (SM)"}
+    from scipy import stats as _sti
+    agg_i = {k: (k, "first") for k in IDC}
+    agg_i.update({y: (y, "median" if y in ("area_oa", "r_sampen_ap_oa") else "mean") for y in IDY})
+    agg_i["n"] = ("queda", "size")
+    MI = df.groupby("mun").agg(**agg_i)
+    MI = MI[MI.n >= 10]
+    if len(MI) < 6:
+        st.info("Poucos municípios no recorte para esta análise.")
+    else:
+        lin = []
+        for y, yl in IDY.items():
+            row = {"Indicador": yl}
+            for c, cl in IDC.items():
+                x = MI[[c, y]].dropna()
+                r, p = _sti.spearmanr(x[c], x[y]) if len(x) >= 6 else (np.nan, np.nan)
+                row[cl] = r
+                row[cl + " p"] = p
+            lin.append(row)
+        TI = pd.DataFrame(lin)
+        zt = TI[list(IDC.values())].values
+        txt = [[("–" if pd.isna(v) else f"{v:+.2f}".replace(".", ",") + (" *" if TI.loc[i, c + " p"] < 0.05 else ""))
+                for c, v in zip(IDC.values(), zt[i])] for i in range(len(TI))]
+        fig = go.Figure(go.Heatmap(z=zt, x=list(IDC.values()), y=TI.Indicador, text=txt, texttemplate="%{text}",
+                                   colorscale="RdBu_r", zmin=-0.8, zmax=0.8, colorbar=dict(title="ρ")))
+        fig.update_layout(height=430, yaxis_autorange="reversed", margin=dict(l=10, r=10, t=10, b=10))
+        i1, i2 = st.columns([3, 2])
+        i1.plotly_chart(fig, width="stretch")
+        i1.caption(f"Correlação de Spearman entre municípios ({len(MI)} municípios no recorte). * = p < 0,05. "
+                   "Negativo = quanto maior o IDHM, menor o indicador.")
+        cx = i2.selectbox("Componente do IDHM", list(IDC), format_func=IDC.get, key="idhm_x")
+        cy = i2.selectbox("Indicador", list(IDY), format_func=IDY.get, key="idhm_y")
+        t = MI.reset_index()
+        t["macro"] = t.mun.map(df_all.drop_duplicates("mun").set_index("mun").macro_lbl)
+        esc_ = 100 if IDY[cy].endswith("(%)") else 1
+        t["yv"] = t[cy] * esc_
+        fig = px.scatter(t, x=cx, y="yv", text="mun", size="n", size_max=16, color="macro", color_discrete_map=MACRO_COR,
+                         labels={cx: IDC[cx], "yv": IDY[cy], "macro": ""})
+        fig.update_traces(textposition="top center", textfont_size=9)
+        tt = t[[cx, "yv"]].dropna()
+        if len(tt) >= 3:
+            z = np.polyfit(tt[cx], tt.yv, 1)
+            xs = np.linspace(tt[cx].min(), tt[cx].max(), 20)
+            fig.add_scatter(x=xs, y=np.polyval(z, xs), mode="lines", line=dict(dash="dash", color="#4c5856"),
+                            showlegend=False, hoverinfo="skip")
+        fig.update_layout(height=420, legend_orientation="h")
+        i2.plotly_chart(fig, width="stretch")
+
+    st.markdown("**O IDHM do município pesa por si só, ou é o perfil das mulheres?**")
+
+    @st.cache_data(show_spinner=False)
+    def modelos_idhm(dados):
+        d = dados.copy()
+        d["idhm10"] = d.idhm * 10
+        d["log_area"] = np.log(d.area_oa)
+        out = []
+        specs = [("Bruto", ["idhm10"]), ("+ idade", ["idhm10", "idade"]),
+                 ("+ idade, renda, escolaridade", ["idhm10", "idade", "renda", "esc"]),
+                 ("+ idade, renda, escolaridade, diabetes, dif. equilíbrio, obstáculos",
+                  ["idhm10", "idade", "renda", "esc", "diabetes", "dequil", "obst"])]
+        for nome, X in specs:
+            dd = d[["queda", "mun"] + X].dropna()
+            try:
+                m = sm.Logit(dd.queda, sm.add_constant(dd[X])).fit(disp=0, cov_type="cluster",
+                                                                    cov_kwds={"groups": pd.factorize(dd.mun)[0]})
+                ci = np.exp(m.conf_int().loc["idhm10"])
+                out.append(dict(Desfecho="Queda (OR por +0,1 no IDHM)", Ajuste=nome, Efeito=float(np.exp(m.params["idhm10"])),
+                                lo=float(ci[0]), hi=float(ci[1]), p=float(m.pvalues["idhm10"]), n=len(dd)))
+            except Exception:
+                pass
+        for nome, X in [("Bruto", ["idhm10"]), ("+ idade, IMC", ["idhm10", "idade", "imc"]),
+                        ("+ idade, IMC, renda, escolaridade", ["idhm10", "idade", "imc", "renda", "esc"])]:
+            dd = d[["log_area", "mun"] + X].dropna()
+            m = sm.OLS(dd.log_area, sm.add_constant(dd[X])).fit(cov_type="cluster", cov_kwds={"groups": pd.factorize(dd.mun)[0]})
+            ci = m.conf_int().loc["idhm10"]
+            out.append(dict(Desfecho="Área da elipse OA (% de mudança por +0,1 no IDHM)", Ajuste=nome,
+                            Efeito=float((np.exp(m.params["idhm10"]) - 1) * 100), lo=float((np.exp(ci[0]) - 1) * 100),
+                            hi=float((np.exp(ci[1]) - 1) * 100), p=float(m.pvalues["idhm10"]), n=len(dd)))
+        return pd.DataFrame(out)
+
+    TM = modelos_idhm(df_all)
+    st.dataframe(TM, hide_index=True, width="stretch",
+                 column_config={"Efeito": st.column_config.NumberColumn(format="%.2f"),
+                                "lo": st.column_config.NumberColumn("IC inf.", format="%.2f"),
+                                "hi": st.column_config.NumberColumn("IC sup.", format="%.2f"),
+                                "p": st.column_config.NumberColumn(format="%.3f")})
+    st.caption("Modelos com cada mulher como unidade e erro-padrão agrupado por município (amostra completa, sem filtros). "
+               "Leitura na amostra completa: entre municípios, menor IDHM (sobretudo nas dimensões renda e longevidade) "
+               "acompanha mais quedas; mas, quando se considera a idade, a renda e a escolaridade de cada mulher, o IDHM "
+               "deixa de ter efeito próprio sobre a queda: o risco maior nos municípios pobres vem do perfil das mulheres "
+               "que vivem neles. Já a oscilação postural é menor nos municípios de IDHM mais alto mesmo após o ajuste "
+               "(cerca de 9–11% a menos por +0,1), o que pode refletir diferenças reais ou condições de coleta.")
 
 # ================================================================ CICLO DE VIDA
 with abas[3]:
