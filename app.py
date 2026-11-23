@@ -48,11 +48,28 @@ BINLBL = {
 }
 
 
+# IDHM 2010 (PNUD/IPEA/FJP): total, renda, longevidade, educação; usado se preparar_dados.py não trouxer
+IDHM_2010 = {'Augusto Corrêa': (0.520, 0.480, 0.772, 0.380), 'Capanema': (0.655, 0.610, 0.794, 0.580),
+             'Bragança': (0.600, 0.589, 0.755, 0.486), 'Tracuateua': (0.531, 0.514, 0.776, 0.376),
+             'Cachoeira do Piriá': (0.473, 0.449, 0.779, 0.303), 'Castanhal': (0.673, 0.654, 0.800, 0.582),
+             'Belém': (0.746, 0.751, 0.822, 0.673), 'Ananindeua': (0.718, 0.684, 0.821, 0.658),
+             'Marituba': (0.676, 0.621, 0.793, 0.628), 'Oeiras do Pará': (0.507, 0.502, 0.754, 0.344),
+             'Altamira': (0.665, 0.662, 0.811, 0.548), 'Vitória do Xingu': (0.596, 0.594, 0.792, 0.451),
+             'Juruti': (0.592, 0.547, 0.756, 0.501), 'Óbidos': (0.594, 0.556, 0.756, 0.499),
+             'Oriximiná': (0.623, 0.599, 0.778, 0.520), 'Santarém': (0.691, 0.632, 0.807, 0.648),
+             'Itaituba': (0.640, 0.644, 0.800, 0.510), 'Itupiranga': (0.528, 0.543, 0.746, 0.364),
+             'Tucuruí': (0.666, 0.675, 0.800, 0.548), 'Nova Ipixuna': (0.581, 0.590, 0.766, 0.435),
+             'Marabá': (0.668, 0.673, 0.785, 0.564), 'Parauapebas': (0.715, 0.701, 0.809, 0.644)}
+
+
 # ---------------------------------------------------------------- dados
 @st.cache_data
 def carregar():
     from preparar_dados import preparar
     d = preparar()
+    if "idhm" not in d.columns:  # preparar_dados.py antigo no repositório: completa o IDHM aqui
+        for i, k in enumerate(["idhm", "idhm_renda", "idhm_long", "idhm_educ"]):
+            d[k] = d["mun"].map(lambda m: IDHM_2010.get(m, (np.nan,) * 4)[i]).astype(float)
     # colunas do celular (versões antigas do CSV não as têm): cria vazias para o app não quebrar
     for b in ["RMS AP", "RMS ML", "Desvio total", "Área elipse", "Freq. mediana AP", "Freq. mediana ML",
               "Energia baixa AP", "Energia média AP", "Energia alta AP", "Energia baixa ML", "Energia média ML",
